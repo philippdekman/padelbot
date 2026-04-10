@@ -24,10 +24,12 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-SETTINGS_DIR = os.environ.get("DATA_DIR", "data")
-os.makedirs(SETTINGS_DIR, exist_ok=True)
-SETTINGS_FILE = os.path.join(SETTINGS_DIR, "user_settings.json")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    print("ERROR: TELEGRAM_BOT_TOKEN environment variable is not set!")
+    print("Set it in Railway: Variables tab -> New Variable")
+    exit(1)
+SETTINGS_FILE = "user_settings.json"
 
 # ─── Location presets ───────────────────────────────────────────────
 LOCATIONS = {
@@ -630,22 +632,16 @@ def do_search(w):
 
 def event_key(ev):
     if ev.get("platform") == "matchi":
-        return f"matchi_{ev.get('activity_id', '')}_{ev.get('date', '')}_{ev.get('registered_count', 0)}"
+        # MATCHi: activity + date (same activity on different dates = different events)
+        return f"matchi_{ev.get('activity_id', '')}_{ev.get('date', '')}"
     eid = ev.get("match_id") or ev.get("tournament_id") or ev.get("id", "")
     if ev.get("tournament_id"):
-        # Include available_places so tournament reappears when spot opens
+        # Tournament: include available_places so it reappears when spot opens
         avail = ev.get("available_places", len(ev.get("registered_players", [])))
         return f"{eid}_avail{avail}"
-    # For matches: include player count AND level fingerprint
-    # so match reappears in monitoring if a low-level player leaves
-    if "teams" in ev:
-        levels = sorted(p.get("level_value", 0) or 0
-                        for team in ev.get("teams", [])
-                        for p in team.get("players", []))
-        lvl_hash = "_".join(f"{l:.1f}" for l in levels)
-        return f"{eid}_{len(levels)}_{lvl_hash}"
-    players = len(ev.get("registered_players", []))
-    return f"{eid}_{players}"
+    # Match: just match_id. If a low-level player leaves, the match
+    # was previously filtered out (not in seen) → now passes filter → appears as new.
+    return eid
 
 def _get_event_dt(ev):
     """Get datetime for sorting any event type, converted to local time."""
