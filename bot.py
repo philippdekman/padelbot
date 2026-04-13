@@ -996,6 +996,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    # Set stop flag in user settings
+    u = get_user(uid)
+    u["monitoring_active"] = False
+    set_user(uid, u)
+    # Remove scheduled jobs
     for job in context.job_queue.get_jobs_by_name(f"watch_{uid}"):
         job.schedule_removal()
     await update.message.reply_text("⏹ Мониторинг остановлен.")
@@ -1032,6 +1037,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Stop button ──
     if data == "cmd_stop_btn":
+        u_stop = get_user(uid)
+        u_stop["monitoring_active"] = False
+        set_user(uid, u_stop)
         for job in context.job_queue.get_jobs_by_name(f"watch_{uid}"):
             job.schedule_removal()
         await q.edit_message_text("⏹ Мониторинг остановлен.\n\n/start — начать заново")
@@ -1232,6 +1240,7 @@ async def launch_monitoring(q, uid, context, w):
     for t in tournaments: seen[event_key(t)] = True
     for mc in matchi: seen[event_key(mc)] = True
     u["seen_events"] = seen
+    u["monitoring_active"] = True
     set_user(uid, u)
 
     for chunk in split_message(text):
@@ -1258,6 +1267,10 @@ async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
     uid = context.job.data["uid"]
     chat_id = context.job.data["chat_id"]
     u = get_user(uid)
+    # Check stop flag — if stopped, cancel this job and exit
+    if not u.get("monitoring_active", False):
+        context.job.schedule_removal()
+        return
     w = u.get("wizard")
     if not w:
         return
