@@ -979,9 +979,13 @@ async def show_step(source, uid, context):
 # ─── Handlers ───────────────────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    # Stop any existing monitoring — prevents duplicate notifications
+    for job in context.job_queue.get_jobs_by_name(f"watch_{uid}"):
+        job.schedule_removal()
     u = get_user(uid)
     u["wizard"] = None
     u["seen_events"] = {}
+    u["monitoring_active"] = False
     set_user(uid, u)
 
     await update.message.reply_text(
