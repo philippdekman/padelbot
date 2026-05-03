@@ -895,12 +895,14 @@ def summary_text(w):
         f"🔄 Частота: каждые {w.get('frequency', 60)} мин\n"
     )
 
-def kb_confirm():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀 Запустить мониторинг", callback_data="wiz_go")],
-        [InlineKeyboardButton("🔍 Поиск сейчас (без мониторинга)", callback_data="wiz_search")],
-        [InlineKeyboardButton("⚙️ Перенастроить", callback_data="wiz_restart")],
-    ])
+def kb_confirm(modifying=False):
+    buttons = []
+    if modifying:
+        buttons.append([InlineKeyboardButton("💾 Применить (без перезапуска)", callback_data="wiz_apply")])
+    buttons.append([InlineKeyboardButton("🚀 Запустить мониторинг", callback_data="wiz_go")])
+    buttons.append([InlineKeyboardButton("🔍 Поиск сейчас (без мониторинга)", callback_data="wiz_search")])
+    buttons.append([InlineKeyboardButton("⚙️ Перенастроить с нуля", callback_data="wiz_restart")])
+    return InlineKeyboardMarkup(buttons)
 
 # ─── Step renderer ──────────────────────────────────────────────────
 async def show_step(source, uid, context):
@@ -974,7 +976,8 @@ async def show_step(source, uid, context):
         await send(f"🔄 <b>Шаг 8/8 — Частота обновления:</b>\n\nТекущая: каждые {w['frequency']} мин", kb_frequency(w["frequency"]))
 
     elif step == "confirm":
-        await send(summary_text(w), kb_confirm())
+        modifying = bool(w.get("editing"))
+        await send(summary_text(w), kb_confirm(modifying=modifying))
 
 # ─── Handlers ───────────────────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1009,6 +1012,20 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         job.schedule_removal()
     await update.message.reply_text("⏹ Мониторинг остановлен.")
 
+async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Edit settings without restarting monitoring or losing seen events."""
+    uid = update.effective_user.id
+    u = get_user(uid)
+    w = u.get("wizard")
+    if not w:
+        await update.message.reply_text("Нет настроек. Отправь /start чтобы начать.")
+        return
+    # Mark as editing — keeps seen_events, lets user change any param
+    w["editing"] = True
+    w["step"] = "location"
+    set_user(uid, u)
+    await show_step(update, uid, context)
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     u = get_user(uid)
@@ -1030,9 +1047,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = wiz(uid)
     w = u["wizard"]
 
-    # ── Wizard start/restart ──
+    # ── Wizard start/restart (full reset) ──
     if data in ("wiz_begin", "wiz_restart"):
         u["wizard"] = None
+        u["seen_events"] = {}  # full reset clears history
         set_user(uid, u)
         u = wiz(uid)
         w = u["wizard"]
@@ -1202,6 +1220,44 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_step(q, uid, context)
         return
 
+    # ── Apply changes without restart ──
+    if data == "wiz_apply":
+        # Save settings, keep seen_events. Reschedule with new frequency.
+        w["editing"] = False
+        set_user(uid, u)
+        chat_id = q.message.chat_id
+
+        # Reschedule the watch job with new frequency (keeps existing seen_events)
+        job_name = f"watch_{uid}"
+        for job in context.job_queue.get_jobs_by_name(job_name):
+            job.schedule_removal()
+
+        u["monitoring_active"] = True
+        set_user(uid, u)
+        freq_sec = w.get("frequency", 60) * 60
+        context.job_queue.run_repeating(
+            watch_tick, interval=freq_sec, first=freq_sec,
+            name=job_name, data={"uid": uid, "chat_id": chat_id},
+        )
+        await q.edit_message_text(
+            "✅ Настройки обновлены.\n"
+            "Придут только реально новые события, проходящие по новым фильтрам.\n\n"
+            f"🔄 Проверка каждые {w.get('frequency', 60)} мин",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Изменить ещё", callback_data="wiz_edit_again")],
+                [InlineKeyboardButton("⏹ Остановить", callback_data="cmd_stop_btn")],
+            ]),
+        )
+        return
+
+    if data == "wiz_edit_again":
+        u["wizard"]["editing"] = True
+        u["wizard"]["step"] = "location"
+        set_user(uid, u)
+        await show_step(q, uid, context)
+        return
+
     # ── Confirm & Launch ──
     if data == "wiz_go":
         await launch_monitoring(q, uid, context, w)
@@ -1305,6 +1361,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("edit", cmd_edit))
     app.add_handler(CallbackQueryHandler(on_callback))
     log.info("Bot starting...")
     app.run_polling(drop_pending_updates=True)
