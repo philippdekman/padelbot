@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import urllib.request, urllib.error
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, MenuButtonCommands
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes,
     MessageHandler, filters,
@@ -1375,9 +1375,8 @@ async def _send_pdf_calendar(uid, chat_id, context, start_date, end_date, label_
     u = get_user(uid)
     pt_id = u.get("playtomic_user_id")
     if not pt_id:
-        await context.bot.send_message(chat_id,
-            "Сначала сохрани Playtomic ID: <code>/setid 9436699</code>",
-            parse_mode="HTML")
+        await context.bot.send_message(chat_id, NEED_LINK_TEXT,
+            parse_mode="HTML", disable_web_page_preview=True)
         return
     matches = playtomic_user_matches(pt_id)
     # Determine location label from user's wizard or first match
@@ -1418,12 +1417,11 @@ async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             end_date = datetime.strptime(args[1], "%Y-%m-%d").date()
         except ValueError:
             await update.message.reply_text(
-                "Формат: <code>/pdf 2026-05-05 2026-05-15</code>\n"
-                "Или без аргументов — ближайшие 14 дней.",
-                parse_mode="HTML")
+                "Не получилось разобрать даты. Открой меню и выбери «PDF календарь»."
+            )
             return
         if end_date < start_date:
-            await update.message.reply_text("Конечная дата раньше начальной.")
+            await update.message.reply_text("Конечная дата раньше начальной. Открой меню кнопкой «Menu» внизу.")
             return
         days = (end_date - start_date).days + 1
         if days > 21:
@@ -1441,9 +1439,7 @@ async def cmd_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = get_user(uid)
     pt_id = u.get("playtomic_user_id")
     if not pt_id:
-        await update.message.reply_text(
-            "Сначала сохрани Playtomic ID: <code>/setid 9436699</code>",
-            parse_mode="HTML")
+        await _need_link(update.message)
         return
     await update.message.reply_text("🔄 Строю календарь...")
     matches = playtomic_user_matches(pt_id)
@@ -1457,12 +1453,7 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = get_user(uid)
     pt_id = u.get("playtomic_user_id")
     if not pt_id:
-        await update.message.reply_text(
-            "Нужен твой Playtomic user_id.\n\n"
-            "Отправь команду: <code>/setid 9436699</code>\n"
-            "(замени на свой ID. Найти его можно в профиле Playtomic — URL profile.playtomic.io/users/<b>9436699</b>)",
-            parse_mode="HTML"
-        )
+        await _need_link(update.message)
         return
     await update.message.reply_text("🔄 Загружаю расписание...")
     matches = playtomic_user_matches(pt_id)
@@ -1471,6 +1462,19 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(chunk, parse_mode="HTML", disable_web_page_preview=True)
 
 _PROFILE_RE = re.compile(r"playtomic\.io/profile/user/(\d+)")
+
+NEED_LINK_TEXT = (
+    "Пришли ссылку на свой профиль Playtomic. В приложении: "
+    "Профиль → Делиться → Telegram. Пример ссылки:\n"
+    "<code>https://app.playtomic.io/profile/user/9436699</code>"
+)
+
+async def _need_link(target):
+    """Reply asking the user to share their Playtomic profile link."""
+    if hasattr(target, "edit_message_text"):
+        await target.edit_message_text(NEED_LINK_TEXT, parse_mode="HTML", disable_web_page_preview=True)
+    else:
+        await target.reply_text(NEED_LINK_TEXT, parse_mode="HTML", disable_web_page_preview=True)
 
 def parse_playtomic_id(text: str) -> str | None:
     """Accepts a numeric ID or a profile share link, returns numeric user_id."""
@@ -1490,21 +1494,13 @@ async def cmd_setid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = " ".join(context.args) if context.args else ""
     pt_id = parse_playtomic_id(raw)
     if not pt_id:
-        await update.message.reply_text(
-            "Пришли ссылку на свой профиль Playtomic или числовой ID.\n\n"
-            "В приложении Playtomic: Профиль → Делиться → Telegram. Пример ссылки:\n"
-            "<code>https://app.playtomic.io/profile/user/9436699</code>\n\n"
-            "Или: <code>/setid 9436699</code>",
-            parse_mode="HTML", disable_web_page_preview=True
-        )
+        await _need_link(update.message)
         return
     u = get_user(uid)
     u["playtomic_user_id"] = pt_id
     set_user(uid, u)
     await update.message.reply_text(
-        f"Playtomic ID сохранён: <code>{pt_id}</code>\n\n"
-        "Теперь доступны /schedule, /calendar, /pdf, /mywatch.\n"
-        "Для настройки поиска игр — /start.",
+        f"Playtomic ID сохранён: <code>{pt_id}</code>\n\nАккаунт привязан. Открой меню кнопкой «Menu» внизу.",
         parse_mode="HTML"
     )
 
@@ -1521,10 +1517,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u["playtomic_user_id"] = pt_id
     set_user(uid, u)
     await update.message.reply_text(
-        f"Playtomic ID сохранён: <code>{pt_id}</code>\n\n"
-        "Открылись команды: /schedule, /calendar, /pdf, /mywatch.\n"
-        "Для настройки поиска новых игр — /start.",
-        parse_mode="HTML"
+        f"Playtomic ID сохранён: <code>{pt_id}</code>\n\nАккаунт привязан. Открой меню кнопкой «Menu» внизу.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Открыть меню", callback_data="back_main")],
+        ])
     )
 
 async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1533,7 +1530,7 @@ async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = get_user(uid)
     w = u.get("wizard")
     if not w:
-        await update.message.reply_text("Нет настроек. Отправь /start чтобы начать.")
+        await update.message.reply_text("Настроек пока нет. Открой меню кнопкой «Menu» и выбери «Настроить поиск игр».")
         return
     # Mark as editing — keeps seen_events, lets user change any param
     w["editing"] = True
@@ -1546,7 +1543,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = get_user(uid)
     w = u.get("wizard")
     if not w:
-        await update.message.reply_text("Настройки не заданы. /start")
+        await update.message.reply_text("Настройки не заданы. Открой меню кнопкой «Menu».")
         return
     text = summary_text(w)
     active = bool(context.job_queue.get_jobs_by_name(f"watch_{uid}"))
@@ -1635,8 +1632,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pt_id = u.get("playtomic_user_id")
         if not pt_id:
             await q.edit_message_text(
-                "Сначала сохрани Playtomic ID:\n<code>/setid 9436699</code>",
-                parse_mode="HTML")
+                NEED_LINK_TEXT, parse_mode="HTML", disable_web_page_preview=True)
             return
         if u.get("my_account_active"):
             u["my_account_active"] = False
@@ -1667,7 +1663,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Входе/выходе игроков\n"
             f"• Заполнении состава\n"
             f"• Одобрении/отклонении заявок\n\n"
-            f"Отключить: /mywatch"
+            f"Отключить: повторно нажми «Уведомления об изменениях» в меню.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]])
         )
         return
 
@@ -1686,21 +1683,44 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]))
         return
 
+    if data and data.startswith("pdfr_"):
+        # custom range from preset buttons
+        try:
+            _, s, e = data.split("_", 2)
+            start_date = datetime.strptime(s, "%Y-%m-%d").date()
+            end_date = datetime.strptime(e, "%Y-%m-%d").date()
+        except Exception:
+            return
+        chat_id = q.message.chat_id
+        await q.edit_message_text("Строю PDF...")
+        await _send_pdf_calendar(uid, chat_id, context, start_date, end_date)
+        return
+
     if data and data.startswith("pdf_"):
         action = data[4:]
         chat_id = q.message.chat_id
         today = datetime.utcnow().date()
         if action == "custom":
+            # Вместо ввода вручную — выбор пресетов кнопками
+            today = datetime.utcnow().date()
+            from calendar import monthrange
+            this_m_end = today.replace(day=monthrange(today.year, today.month)[1])
+            next_w_start = today + timedelta(days=(7 - today.weekday()) % 7 or 7)
+            next_w_end = next_w_start + timedelta(days=6)
             await q.edit_message_text(
-                "Отправь команду:\n"
-                "<code>/pdf 2026-05-05 2026-05-15</code>\n\n"
-                "(начало — конец, до 21 дня)",
-                parse_mode="HTML")
+                "<b>Выбери период:</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"До конца месяца ({this_m_end.strftime('%d.%m')})", callback_data=f"pdfr_{today.isoformat()}_{this_m_end.isoformat()}")],
+                    [InlineKeyboardButton(f"Следующая неделя ({next_w_start.strftime('%d.%m')}–{next_w_end.strftime('%d.%m')})", callback_data=f"pdfr_{next_w_start.isoformat()}_{next_w_end.isoformat()}")],
+                    [InlineKeyboardButton("+30 дней", callback_data=f"pdfr_{today.isoformat()}_{(today + timedelta(days=29)).isoformat()}")],
+                    [InlineKeyboardButton("← Назад", callback_data="pdf_menu")],
+                ]))
             return
         if action == "all":
             pt_id = u.get("playtomic_user_id")
             if not pt_id:
-                await q.edit_message_text("Сначала <code>/setid</code>", parse_mode="HTML")
+                await _need_link(q)
                 return
             await q.edit_message_text("🔄 Ищу матчи...")
             matches = playtomic_user_matches(pt_id)
@@ -1739,9 +1759,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "my_calendar":
         pt_id = u.get("playtomic_user_id")
         if not pt_id:
-            await q.edit_message_text(
-                "Сначала сохрани Playtomic ID:\n<code>/setid 9436699</code>",
-                parse_mode="HTML")
+            await _need_link(q)
             return
         await q.edit_message_text("🔄 Строю календарь...")
         matches = playtomic_user_matches(pt_id)
@@ -1755,12 +1773,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "my_schedule":
         pt_id = u.get("playtomic_user_id")
         if not pt_id:
-            await q.edit_message_text(
-                "Нужен твой Playtomic user_id.\n\n"
-                "Отправь команду: <code>/setid 9436699</code>\n"
-                "(замени на свой. Найти ID можно в URL профиля Playtomic).",
-                parse_mode="HTML"
-            )
+            await _need_link(q)
             return
         await q.edit_message_text("🔄 Загружаю расписание...")
         matches = playtomic_user_matches(pt_id)
@@ -1787,7 +1800,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_user(uid, u_stop)
         for job in context.job_queue.get_jobs_by_name(f"watch_{uid}"):
             job.schedule_removal()
-        await q.edit_message_text("⏹ Мониторинг остановлен.\n\n/start — начать заново")
+        await q.edit_message_text(
+            "Мониторинг остановлен.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
         return
 
     # ── Location ──
@@ -2045,7 +2060,7 @@ async def launch_monitoring(q, uid, context, w):
     await context.bot.send_message(
         chat_id,
         f"✅ Мониторинг запущен — проверка каждые {w.get('frequency', 60)} мин.\n"
-        f"Буду присылать только <b>новые</b> события.\n\nОстановить: /stop",
+        f"Буду присылать только <b>новые</b> события.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("⚙️ Перенастроить", callback_data="wiz_restart")],
@@ -2171,9 +2186,7 @@ async def cmd_my_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = get_user(uid)
     pt_id = u.get("playtomic_user_id")
     if not pt_id:
-        await update.message.reply_text(
-            "Сначала сохрани Playtomic ID: <code>/setid 9436699</code>",
-            parse_mode="HTML")
+        await _need_link(update.message)
         return
 
     if u.get("my_account_active"):
@@ -2208,7 +2221,7 @@ async def cmd_my_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  • Входе/выходе игроков\n"
         f"  • Заполнении состава (4/4)\n"
         f"  • Одобрении/отклонении твоей заявки\n\n"
-        f"Остановить: /mywatch (ещё раз)"
+        f"Отключить: повторно нажми «Уведомления об изменениях» в меню."
     )
 
 async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
@@ -2245,7 +2258,20 @@ async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Main ───────────────────────────────────────────────────────────
 async def post_init(application):
-    """Restore active monitoring jobs after restart."""
+    """Restore active monitoring jobs after restart and set bot commands."""
+    # Единственная видимая команда — /start, всё остальное через кнопки
+    try:
+        await application.bot.set_my_commands([BotCommand("start", "Открыть меню")])
+        await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        await application.bot.set_my_description(
+            "Мониторинг открытых матчей и турниров Playtomic. "
+            "Уведомления о новых слотах, личное расписание и PDF-календарь."
+        )
+        await application.bot.set_my_short_description(
+            "Открытые матчи Playtomic, уведомления, расписание."
+        )
+    except Exception as e:
+        log.warning("set_my_commands failed: %s", e)
     all_settings = load_all_settings()
     restored, my_restored = 0, 0
     for uid_str, cfg in all_settings.items():
