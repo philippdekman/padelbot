@@ -2005,6 +2005,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("Добавить все игры в календарь", callback_data="ics_all")],
+                [InlineKeyboardButton("Выбрать отдельные дни", callback_data="ics_pickdays")],
                 [InlineKeyboardButton("Только неделя", callback_data="ics_w"),
                  InlineKeyboardButton("2 недели", callback_data="ics_2w"),
                  InlineKeyboardButton("Месяц", callback_data="ics_m")],
