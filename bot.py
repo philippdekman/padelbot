@@ -19,6 +19,7 @@ import urllib.request, urllib.error
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes,
+    MessageHandler, filters,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -1003,17 +1004,32 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u["monitoring_active"] = False
     set_user(uid, u)
 
+    pt_id = u.get("playtomic_user_id")
+    if not pt_id:
+        await update.message.reply_text(
+            "<b>Padel Monitor Bot</b>\n\n"
+            "Мониторинг матчей и турниров на Playtomic.\n\n"
+            "Чтобы начать, пришли ссылку на свой профиль Playtomic. "
+            "Открой приложение Playtomic → Профиль → Делиться → Telegram и вставь сюда.\n\n"
+            "Пример ссылки:\n"
+            "<code>https://app.playtomic.io/profile/user/9436699</code>\n\n"
+            "После этого будут доступны /schedule, /calendar, /pdf, /mywatch и настройка поиска.",
+            parse_mode="HTML", disable_web_page_preview=True
+        )
+        return
+
     await update.message.reply_text(
-        "👋 <b>Padel Monitor Bot</b>\n\n"
-        "Мониторинг матчей и турниров на Playtomic\n\n"
-        "Нажми кнопку ниже чтобы настроить параметры:",
+        "<b>Padel Monitor Bot</b>\n\n"
+        "Мониторинг матчей и турниров на Playtomic.\n\n"
+            f"Playtomic ID: <code>{pt_id}</code>\n"
+            "Нажми кнопку ниже чтобы настроить поиск:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚙️ Настроить мониторинг", callback_data="wiz_begin")],
-            [InlineKeyboardButton("🗓 Календарь", callback_data="my_calendar"),
-             InlineKeyboardButton("📅 Расписание", callback_data="my_schedule")],
-            [InlineKeyboardButton("📄 PDF календарь", callback_data="pdf_menu")],
-            [InlineKeyboardButton("🔔 Мониторинг аккаунта", callback_data="my_watch_toggle")],
+            [InlineKeyboardButton("Настроить мониторинг", callback_data="wiz_begin")],
+            [InlineKeyboardButton("Календарь", callback_data="my_calendar"),
+             InlineKeyboardButton("Расписание", callback_data="my_schedule")],
+            [InlineKeyboardButton("PDF календарь", callback_data="pdf_menu")],
+            [InlineKeyboardButton("Мониторинг аккаунта", callback_data="my_watch_toggle")],
         ])
     )
 
@@ -1462,25 +1478,62 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for chunk in split_message(text):
         await update.message.reply_text(chunk, parse_mode="HTML", disable_web_page_preview=True)
 
+_PROFILE_RE = re.compile(r"playtomic\.io/profile/user/(\d+)")
+
+def parse_playtomic_id(text: str) -> str | None:
+    """Accepts a numeric ID or a profile share link, returns numeric user_id."""
+    if not text:
+        return None
+    text = text.strip()
+    m = _PROFILE_RE.search(text)
+    if m:
+        return m.group(1)
+    if text.isdigit():
+        return text
+    return None
+
 async def cmd_setid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save Playtomic user_id for /schedule."""
+    """Save Playtomic user_id (accepts numeric ID or profile share link)."""
     uid = update.effective_user.id
-    args = context.args
-    if not args:
+    raw = " ".join(context.args) if context.args else ""
+    pt_id = parse_playtomic_id(raw)
+    if not pt_id:
         await update.message.reply_text(
-            "Использование: <code>/setid 9436699</code>\n\n"
-            "ID можно найти в URL профиля Playtomic.",
-            parse_mode="HTML"
+            "Пришли ссылку на свой профиль Playtomic или числовой ID.\n\n"
+            "В приложении Playtomic: Профиль → Делиться → Telegram. Пример ссылки:\n"
+            "<code>https://app.playtomic.io/profile/user/9436699</code>\n\n"
+            "Или: <code>/setid 9436699</code>",
+            parse_mode="HTML", disable_web_page_preview=True
         )
-        return
-    pt_id = args[0].strip()
-    if not pt_id.isdigit():
-        await update.message.reply_text("ID должен быть числом.")
         return
     u = get_user(uid)
     u["playtomic_user_id"] = pt_id
     set_user(uid, u)
-    await update.message.reply_text(f"✅ Playtomic ID сохранён: {pt_id}\n\n/schedule — моё расписание")
+    await update.message.reply_text(
+        f"Playtomic ID сохранён: <code>{pt_id}</code>\n\n"
+        "Теперь доступны /schedule, /calendar, /pdf, /mywatch.\n"
+        "Для настройки поиска игр — /start.",
+        parse_mode="HTML"
+    )
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Catch profile links pasted directly into chat."""
+    if not update.message or not update.message.text:
+        return
+    text = update.message.text
+    pt_id = parse_playtomic_id(text)
+    if not pt_id or "playtomic.io/profile/user/" not in text:
+        return  # оставляем визарду/другим обработчикам разобраться с обычным текстом
+    uid = update.effective_user.id
+    u = get_user(uid)
+    u["playtomic_user_id"] = pt_id
+    set_user(uid, u)
+    await update.message.reply_text(
+        f"Playtomic ID сохранён: <code>{pt_id}</code>\n\n"
+        "Открылись команды: /schedule, /calendar, /pdf, /mywatch.\n"
+        "Для настройки поиска новых игр — /start.",
+        parse_mode="HTML"
+    )
 
 async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Edit settings without restarting monitoring or losing seen events."""
@@ -2163,6 +2216,7 @@ def main():
     app.add_handler(CommandHandler("mywatch", cmd_my_watch))
     app.add_handler(CommandHandler("calendar", cmd_calendar))
     app.add_handler(CommandHandler("pdf", cmd_pdf))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_callback))
     log.info("Bot starting...")
     app.run_polling(drop_pending_updates=True)
