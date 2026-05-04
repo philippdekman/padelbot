@@ -1006,6 +1006,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("⚙️ Настроить мониторинг", callback_data="wiz_begin")],
             [InlineKeyboardButton("📅 Моё расписание", callback_data="my_schedule")],
+            [InlineKeyboardButton("🔔 Мониторинг моего аккаунта", callback_data="my_watch_toggle")],
         ])
     )
 
@@ -1163,6 +1164,47 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data
     u = wiz(uid)
     w = u["wizard"]
+
+    # ── My account watch toggle ──
+    if data == "my_watch_toggle":
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id:
+            await q.edit_message_text(
+                "Сначала сохрани Playtomic ID:\n<code>/setid 9436699</code>",
+                parse_mode="HTML")
+            return
+        if u.get("my_account_active"):
+            u["my_account_active"] = False
+            set_user(uid, u)
+            for job in context.job_queue.get_jobs_by_name(f"my_watch_{uid}"):
+                job.schedule_removal()
+            await q.edit_message_text("⏹ Мониторинг моего аккаунта остановлен.")
+            return
+        matches_my = playtomic_user_matches(pt_id)
+        new_states = {m["match_id"]: _my_match_state(m, pt_id)
+                      for m in matches_my if m.get("match_id")}
+        u["my_match_states"] = new_states
+        u["my_account_active"] = True
+        u["chat_id"] = q.message.chat_id
+        set_user(uid, u)
+        for job in context.job_queue.get_jobs_by_name(f"my_watch_{uid}"):
+            job.schedule_removal()
+        context.job_queue.run_repeating(
+            watch_my_account, interval=600, first=600,
+            name=f"my_watch_{uid}",
+            data={"uid": uid, "chat_id": q.message.chat_id},
+        )
+        await q.edit_message_text(
+            f"✅ Мониторинг моего аккаунта включён.\n\n"
+            f"Отслеживаю {len(new_states)} матчей, проверка каждые 10 мин.\n\n"
+            f"Буду сообщать о:\n"
+            f"• Статусе матча (CONFIRMED/CANCELED)\n"
+            f"• Входе/выходе игроков\n"
+            f"• Заполнении состава\n"
+            f"• Одобрении/отклонении заявок\n\n"
+            f"Отключить: /mywatch"
+        )
+        return
 
     # ── My schedule button ──
     if data == "my_schedule":
@@ -1460,6 +1502,164 @@ async def launch_monitoring(q, uid, context, w):
         ]),
     )
 
+def _my_match_state(m, pt_id):
+    """Snapshot user-relevant state of a match for diff monitoring."""
+    players = [p for team in m.get("teams", []) for p in team.get("players", [])]
+    max_p = sum(t.get("max_players", 0) for t in m.get("teams", []))
+    join_info = m.get("join_requests_info") or {}
+    my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
+    return {
+        "status": m.get("status"),
+        "player_ids": sorted([p.get("user_id") for p in players]),
+        "player_count": len(players),
+        "max_players": max_p,
+        "is_full": len(players) >= max_p if max_p else False,
+        "my_request_status": my_req.get("status") if my_req else None,
+    }
+
+def _diff_my_matches(prev_states, current_matches, pt_id):
+    """Compare previous snapshot vs current. Returns list of human-readable change events."""
+    events = []
+    today = datetime.utcnow().date().isoformat()
+    current_by_id = {m["match_id"]: m for m in current_matches
+                     if m.get("start_date", "")[:10] >= today
+                     and m.get("status") not in ("FINISHED",)}
+
+    for mid, m in current_by_id.items():
+        cur = _my_match_state(m, pt_id)
+        prev = prev_states.get(mid)
+
+        # Format match label
+        dt = parse_dt(m.get("start_date"))
+        when = dt.strftime("%a %d.%m %H:%M") if dt else "?"
+        for en, ru in DAY_NAMES_RU.items():
+            when = when.replace(en, ru)
+        club = m.get("location", "?")
+        link = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
+        label = f'<b>{when}</b> — {club} <a href="{link}">»</a>'
+
+        if prev is None:
+            # New match this user is involved in
+            if pt_id in cur["player_ids"] or cur["my_request_status"]:
+                if cur["my_request_status"] == "PENDING":
+                    events.append(f"📝 Новая заявка: {label}")
+                elif cur["my_request_status"] == "APPROVED":
+                    events.append(f"✅ Заявка одобрена: {label}")
+                else:
+                    events.append(f"➕ Добавлен в матч: {label}")
+            continue
+
+        # Status changed
+        if cur["status"] != prev["status"]:
+            if cur["status"] == "CONFIRMED":
+                events.append(f"✅ Матч ПОДТВЕРЖДЁН: {label}")
+            elif cur["status"] == "CANCELED":
+                events.append(f"❌ Матч ОТМЕНЁН: {label}")
+            elif cur["status"] == "EXPIRED":
+                events.append(f"⚠️ Матч истёк: {label}")
+            else:
+                events.append(f"🔄 Статус изменён ({prev['status']} → {cur['status']}): {label}")
+
+        # Players composition changed
+        joined = set(cur["player_ids"]) - set(prev["player_ids"])
+        left = set(prev["player_ids"]) - set(cur["player_ids"])
+        if joined:
+            jnames = []
+            for p in [p for team in m.get("teams", []) for p in team.get("players", [])]:
+                if p.get("user_id") in joined:
+                    n = (p.get("full_name") or p.get("name") or "?")
+                    lvl = p.get("level_value")
+                    jnames.append(f'{n}{f" ({lvl:.1f})" if lvl is not None else ""}')
+            events.append(f"➕ Игрок вошёл ({', '.join(jnames)}): {label}")
+        if left:
+            events.append(f"➖ Игрок вышел: {label}")
+
+        # Full / no longer full
+        if cur["is_full"] and not prev["is_full"]:
+            events.append(f"🎯 Состав ПОЛНЫЙ ({cur['player_count']}/{cur['max_players']}): {label}")
+        elif not cur["is_full"] and prev["is_full"]:
+            events.append(f"🟡 Освободилось место ({cur['player_count']}/{cur['max_players']}): {label}")
+
+        # Join request status change
+        if cur["my_request_status"] != prev["my_request_status"]:
+            if cur["my_request_status"] == "APPROVED":
+                events.append(f"✅ Твоя заявка ОДОБРЕНА: {label}")
+            elif cur["my_request_status"] == "REJECTED":
+                events.append(f"❌ Твоя заявка ОТКЛОНЕНА: {label}")
+            elif cur["my_request_status"] == "PENDING":
+                events.append(f"📝 Отправлена заявка: {label}")
+
+    return events
+
+async def watch_my_account(context: ContextTypes.DEFAULT_TYPE):
+    """Monitor changes in user's own Playtomic matches."""
+    uid = context.job.data["uid"]
+    chat_id = context.job.data["chat_id"]
+    u = get_user(uid)
+    if not u.get("my_account_active"):
+        context.job.schedule_removal()
+        return
+    pt_id = u.get("playtomic_user_id")
+    if not pt_id:
+        return
+    matches = playtomic_user_matches(pt_id)
+    prev_states = u.get("my_match_states", {})
+    new_states = {m["match_id"]: _my_match_state(m, pt_id)
+                  for m in matches if m.get("match_id")}
+    events = _diff_my_matches(prev_states, matches, pt_id)
+    u["my_match_states"] = new_states
+    set_user(uid, u)
+    if events:
+        text = "<b>📅 Изменения в моём расписании:</b>\n\n" + "\n\n".join(events)
+        for chunk in split_message(text):
+            await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
+
+async def cmd_my_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle monitoring of user's own matches."""
+    uid = update.effective_user.id
+    u = get_user(uid)
+    pt_id = u.get("playtomic_user_id")
+    if not pt_id:
+        await update.message.reply_text(
+            "Сначала сохрани Playtomic ID: <code>/setid 9436699</code>",
+            parse_mode="HTML")
+        return
+
+    if u.get("my_account_active"):
+        u["my_account_active"] = False
+        set_user(uid, u)
+        for job in context.job_queue.get_jobs_by_name(f"my_watch_{uid}"):
+            job.schedule_removal()
+        await update.message.reply_text("⏹ Мониторинг моего аккаунта остановлен.")
+        return
+
+    # Initialize — take a snapshot, no notifications on first run
+    matches = playtomic_user_matches(pt_id)
+    new_states = {m["match_id"]: _my_match_state(m, pt_id)
+                  for m in matches if m.get("match_id")}
+    u["my_match_states"] = new_states
+    u["my_account_active"] = True
+    u["chat_id"] = update.effective_chat.id
+    set_user(uid, u)
+
+    chat_id = update.effective_chat.id
+    for job in context.job_queue.get_jobs_by_name(f"my_watch_{uid}"):
+        job.schedule_removal()
+    context.job_queue.run_repeating(
+        watch_my_account, interval=600, first=600,
+        name=f"my_watch_{uid}", data={"uid": uid, "chat_id": chat_id},
+    )
+    await update.message.reply_text(
+        f"✅ Мониторинг моего аккаунта включён (проверка каждые 10 мин).\n\n"
+        f"Отслеживаю: {len(new_states)} матчей\n\n"
+        f"Буду сообщать о:\n"
+        f"  • Изменении статуса матча (CONFIRMED/CANCELED)\n"
+        f"  • Входе/выходе игроков\n"
+        f"  • Заполнении состава (4/4)\n"
+        f"  • Одобрении/отклонении твоей заявки\n\n"
+        f"Остановить: /mywatch (ещё раз)"
+    )
+
 async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
     uid = context.job.data["uid"]
     chat_id = context.job.data["chat_id"]
@@ -1496,25 +1696,29 @@ async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application):
     """Restore active monitoring jobs after restart."""
     all_settings = load_all_settings()
-    restored = 0
+    restored, my_restored = 0, 0
     for uid_str, cfg in all_settings.items():
-        if not cfg.get("monitoring_active"):
-            continue
-        w = cfg.get("wizard")
-        if not w:
-            continue
         try:
             uid = int(uid_str)
         except ValueError:
             continue
         chat_id = cfg.get("chat_id", uid)
-        freq_sec = w.get("frequency", 60) * 60
-        application.job_queue.run_repeating(
-            watch_tick, interval=freq_sec, first=freq_sec,
-            name=f"watch_{uid}", data={"uid": uid, "chat_id": chat_id},
-        )
-        restored += 1
-    log.info(f"Restored {restored} monitoring job(s) after restart")
+        # Search monitoring
+        if cfg.get("monitoring_active") and cfg.get("wizard"):
+            freq_sec = cfg["wizard"].get("frequency", 60) * 60
+            application.job_queue.run_repeating(
+                watch_tick, interval=freq_sec, first=freq_sec,
+                name=f"watch_{uid}", data={"uid": uid, "chat_id": chat_id},
+            )
+            restored += 1
+        # My-account monitoring
+        if cfg.get("my_account_active") and cfg.get("playtomic_user_id"):
+            application.job_queue.run_repeating(
+                watch_my_account, interval=600, first=600,
+                name=f"my_watch_{uid}", data={"uid": uid, "chat_id": chat_id},
+            )
+            my_restored += 1
+    log.info(f"Restored {restored} search job(s), {my_restored} my-account job(s)")
 
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
@@ -1524,6 +1728,7 @@ def main():
     app.add_handler(CommandHandler("edit", cmd_edit))
     app.add_handler(CommandHandler("schedule", cmd_schedule))
     app.add_handler(CommandHandler("setid", cmd_setid))
+    app.add_handler(CommandHandler("mywatch", cmd_my_watch))
     app.add_handler(CallbackQueryHandler(on_callback))
     log.info("Bot starting...")
     app.run_polling(drop_pending_updates=True)
