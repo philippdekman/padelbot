@@ -1058,11 +1058,18 @@ def _main_menu_kb(u, context, uid):
                      InlineKeyboardButton("Остановить", callback_data="stop_monitoring")])
     elif not has_wizard:
         rows.append([InlineKeyboardButton("Настроить поиск игр", callback_data="wiz_begin")])
+    my_on = bool(context.job_queue.get_jobs_by_name(f"my_watch_{uid}"))
     rows += [
-        [InlineKeyboardButton("Моё расписание", callback_data="my_schedule"),
-         InlineKeyboardButton("Календарь", callback_data="my_calendar")],
-        [InlineKeyboardButton("PDF календарь", callback_data="pdf_menu")],
-        [InlineKeyboardButton("Уведомления об изменениях в моих матчах", callback_data="my_watch_toggle")],
+        [InlineKeyboardButton("Мои матчи — добавить в календарь, открыть маршрут", callback_data="my_schedule")],
+        [InlineKeyboardButton("PDF календарь на печать", callback_data="pdf_menu")],
+        [InlineKeyboardButton(
+            "Уведомления о моих матчах: выключить" if my_on else "Уведомления о моих матчах: включить",
+            callback_data="my_watch_toggle"
+        )],
+    ]
+    if my_on:
+        rows.append([InlineKeyboardButton("Проверить мои матчи сейчас", callback_data="my_watch_now")])
+    rows += [
         [InlineKeyboardButton("Статус и параметры", callback_data="show_status")],
         [InlineKeyboardButton("Сменить аккаунт Playtomic", callback_data="reset_id")],
     ]
@@ -1772,6 +1779,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_main_menu_kb(u, context, uid))
         return
 
+    # ── Ручная проверка моих матчей ──
+    if data == "my_watch_now":
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id:
+            await _need_link(q); return
+        chat_id = q.message.chat_id
+        await q.edit_message_text("Проверяю изменения...")
+        matches = playtomic_user_matches(pt_id)
+        prev_states = u.get("my_match_states", {})
+        new_states = {m["match_id"]: _my_match_state(m, pt_id) for m in matches if m.get("match_id")}
+        events = _diff_my_matches(prev_states, matches, pt_id)
+        u["my_match_states"] = new_states
+        u["chat_id"] = chat_id
+        set_user(uid, u)
+        if events:
+            text = "<b>Изменения в моих матчах:</b>\n\n" + "\n\n".join(events)
+            for chunk in split_message(text):
+                await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
+        else:
+            await context.bot.send_message(chat_id, "Ничего не изменилось.")
+        await context.bot.send_message(chat_id, "—",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return
+
     # ── Resume search monitoring (without reset) ──
     if data == "resume_search":
         w = u.get("wizard")
@@ -1819,7 +1850,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for job in context.job_queue.get_jobs_by_name(f"my_watch_{uid}"):
             job.schedule_removal()
         context.job_queue.run_repeating(
-            watch_my_account, interval=600, first=600,
+            watch_my_account, interval=600, first=30,
             name=f"my_watch_{uid}",
             data={"uid": uid, "chat_id": q.message.chat_id},
         )
@@ -2504,6 +2535,14 @@ def _diff_my_matches(prev_states, current_matches, pt_id):
             elif cur["my_request_status"] == "PENDING":
                 events.append(f"📝 Отправлена заявка: {label}")
 
+    # ── Исчезнувшие матчи (удалены/отменены/я вышел) ──
+    for mid, prev in prev_states.items():
+        if mid in current_by_id:
+            continue
+        # Было состояние, сейчас матч не возвращается API.
+        link = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
+        events.append(f"❌ Матч удалён или вы больше не в составе: <a href=\"{link}\">открыть</a>")
+
     return events
 
 async def watch_my_account(context: ContextTypes.DEFAULT_TYPE):
@@ -2559,7 +2598,7 @@ async def cmd_my_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for job in context.job_queue.get_jobs_by_name(f"my_watch_{uid}"):
         job.schedule_removal()
     context.job_queue.run_repeating(
-        watch_my_account, interval=600, first=600,
+        watch_my_account, interval=600, first=30,
         name=f"my_watch_{uid}", data={"uid": uid, "chat_id": chat_id},
     )
     await update.message.reply_text(
