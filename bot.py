@@ -2223,7 +2223,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(path, "w") as f: f.write(ics)
         with open(path, "rb") as f:
             await context.bot.send_document(chat_id, document=f, filename=f"padel_match.ics",
-                caption="Открой файл — добавится в Apple/Google/Outlook календарь.")
+                caption="<b>Как открыть на iPhone:</b>\n"
+                        "1) Нажми на файл выше\n"
+                        "2) Справа вверху «Сохранить» → «Поделиться» → «Календарь»\n"
+                        "Или: «Share» → «Скопировать в Файлы» → открой в файлах → добавится в Календарь.\n\n"
+                        "<b>Android:</b> файл откроется в Google Calendar автоматически.",
+                parse_mode="HTML")
         try: os.remove(path)
         except Exception: pass
         return
@@ -2244,7 +2249,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(path, "w") as f: f.write(ics)
         with open(path, "rb") as f:
             await context.bot.send_document(chat_id, document=f, filename="padel_schedule.ics",
-                caption=f"{n} матчей. Нажми на файл — добавятся в Google/Apple/Outlook календарь.")
+                caption=f"<b>{n} матчей</b>\n\n"
+                        "<b>iPhone:</b> нажми на файл → Сохранить → Поделиться → Календарь.\n"
+                        "Или: Share → Скопировать в Файлы → открой в Файлах — добавится в Календарь.\n\n"
+                        "<b>Android:</b> файл откроется в Google Calendar автоматически.",
+                parse_mode="HTML")
         try: os.remove(path)
         except Exception: pass
         # Не помечаем автоматически — пользователь сам отметит кнопкой «Отметить как добавленное».
@@ -2344,7 +2353,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(path, "w") as f: f.write(ics)
         with open(path, "rb") as f:
             await context.bot.send_document(chat_id, document=f, filename="padel_schedule.ics",
-                caption=f"{n} матчей по выбранным дням. Нажми на файл — добавятся в календарь.")
+                caption=f"<b>{n} матчей по выбранным дням</b>\n\n"
+                        "<b>iPhone:</b> нажми на файл → Сохранить → Поделиться → Календарь.\n"
+                        "Или: Share → Скопировать в Файлы → открой в Файлах.\n\n"
+                        "<b>Android:</b> файл откроется в Google Calendar автоматически.",
+                parse_mode="HTML")
         try: os.remove(path)
         except Exception: pass
         u_now["ics_picked_days"] = []
