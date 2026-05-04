@@ -923,13 +923,17 @@ def summary_text(w):
         f"🔄 Частота: каждые {w.get('frequency', 60)} мин\n"
     )
 
-def kb_confirm(modifying=False):
+def kb_confirm(modifying=False, oneoff=False):
     buttons = []
+    if oneoff:
+        buttons.append([InlineKeyboardButton("Найти матчи сейчас", callback_data="wiz_go")])
+        buttons.append([InlineKeyboardButton("Отмена", callback_data="oneoff_cancel")])
+        return InlineKeyboardMarkup(buttons)
     if modifying:
-        buttons.append([InlineKeyboardButton("💾 Применить (без перезапуска)", callback_data="wiz_apply")])
-    buttons.append([InlineKeyboardButton("🚀 Запустить мониторинг", callback_data="wiz_go")])
-    buttons.append([InlineKeyboardButton("🔍 Поиск сейчас (без мониторинга)", callback_data="wiz_search")])
-    buttons.append([InlineKeyboardButton("⚙️ Перенастроить с нуля", callback_data="wiz_restart")])
+        buttons.append([InlineKeyboardButton("Применить (без перезапуска)", callback_data="wiz_apply")])
+    buttons.append([InlineKeyboardButton("Запустить мониторинг", callback_data="wiz_go")])
+    buttons.append([InlineKeyboardButton("Поиск сейчас (без мониторинга)", callback_data="wiz_search")])
+    buttons.append([InlineKeyboardButton("Перенастроить с нуля", callback_data="wiz_restart")])
     return InlineKeyboardMarkup(buttons)
 
 # ─── Step renderer ──────────────────────────────────────────────────
@@ -1005,7 +1009,8 @@ async def show_step(source, uid, context):
 
     elif step == "confirm":
         modifying = bool(w.get("editing"))
-        await send(summary_text(w), kb_confirm(modifying=modifying))
+        oneoff = bool(w.get("oneoff"))
+        await send(summary_text(w), kb_confirm(modifying=modifying, oneoff=oneoff))
 
 # ─── Handlers ───────────────────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1057,7 +1062,8 @@ def _main_menu_kb(u, context, uid):
         rows.append([InlineKeyboardButton("Перенастроить поиск", callback_data="wiz_begin"),
                      InlineKeyboardButton("Остановить", callback_data="stop_monitoring")])
     elif not has_wizard:
-        rows.append([InlineKeyboardButton("Настроить поиск игр", callback_data="wiz_begin")])
+        rows.append([InlineKeyboardButton("Настроить постоянный поиск игр", callback_data="wiz_begin")])
+    rows.append([InlineKeyboardButton("Разовый поиск (по фильтрам, без мониторинга)", callback_data="oneoff_begin")])
     my_on = bool(context.job_queue.get_jobs_by_name(f"my_watch_{uid}"))
     rows += [
         [InlineKeyboardButton("Мои матчи — добавить в календарь, открыть маршрут", callback_data="my_schedule")],
@@ -2364,6 +2370,42 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_user(uid, u_now)
         return
 
+    # ── Отмена разового поиска ──
+    if data == "oneoff_cancel":
+        u_now = get_user(uid)
+        u_now["wizard"] = u_now.pop("_wizard_backup", None)
+        u_now["oneoff_active"] = False
+        set_user(uid, u_now)
+        await q.edit_message_text("Отменено. Настройки мониторинга сохранены.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return
+
+    # ── Разовый поиск ──
+    if data == "oneoff_begin":
+        u_now = get_user(uid)
+        # Сохраняем оригинальный wizard, подменяем на временный
+        u_now["_wizard_backup"] = u_now.get("wizard")
+        u_now["oneoff_active"] = True
+        u_now["wizard"] = {
+            "step": "location",
+            "locations": [],
+            "radius_km": 50,
+            "loc_dates": {},
+            "min_players_match": 1,
+            "min_players_tourn": 0,
+            "level_min": None,
+            "level_max": None,
+            "level_phase": "min",
+            "time_from": None, "time_to": None,
+            "time_from_h": 0, "time_from_m": 0,
+            "time_to_h": 23, "time_to_m": 30,
+            "frequency": 60, "dates_sub": None,
+            "oneoff": True,
+        }
+        set_user(uid, u_now)
+        await show_step(q, uid, context)
+        return
+
     # ── Wizard start/restart ──
     # wiz_begin: мягкий — если визард уже есть, режим редактирования, история сохраняется.
     # wiz_restart: полный сброс (явный выбор «Перенастроить с нуля»).
@@ -2506,14 +2548,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if action == "ok":
             w[f"time_{phase}"] = fmt_time(w.get(h_key, 0), w.get(m_key, 0))
-            w["step"] = "time_to" if phase == "from" else "frequency"
+            if phase == "from":
+                w["step"] = "time_to"
+            else:
+                w["step"] = "confirm" if w.get("oneoff") else "frequency"
             set_user(uid, u)
             await show_step(q, uid, context)
             return
 
         if action == "any":
             w[f"time_{phase}"] = None
-            w["step"] = "time_to" if phase == "from" else "frequency"
+            if phase == "from":
+                w["step"] = "time_to"
+            else:
+                w["step"] = "confirm" if w.get("oneoff") else "frequency"
             set_user(uid, u)
             await show_step(q, uid, context)
             return
@@ -2595,6 +2643,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Confirm & Launch ──
     if data == "wiz_go":
+        if w and w.get("oneoff"):
+            # Разовый поиск: выполняем do_search, восстанавливаем backup wizard
+            chat_id = q.message.chat_id
+            await q.edit_message_text("Ищу по вашим фильтрам...", parse_mode="HTML")
+            matches, tournaments, matchi = do_search(w)
+            text = format_results(matches, tournaments, matchi, "Результаты разового поиска")
+            for chunk in split_message(text):
+                await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
+            # Восстанавливаем оригинальные настройки мониторинга
+            u_now = get_user(uid)
+            u_now["wizard"] = u_now.pop("_wizard_backup", None)
+            u_now["oneoff_active"] = False
+            set_user(uid, u_now)
+            await context.bot.send_message(chat_id, "Разовый поиск завершён. Настройки мониторинга сохранены.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+            return
         await launch_monitoring(q, uid, context, w)
         return
 
