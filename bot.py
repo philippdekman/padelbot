@@ -803,11 +803,10 @@ def kb_location():
 def kb_radius(km):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("◀ -5", callback_data="rad_-5"),
-         InlineKeyboardButton(f"📏 {km} км", callback_data="rad_noop"),
          InlineKeyboardButton("+5 ▶", callback_data="rad_+5")],
         [InlineKeyboardButton("◀ -1", callback_data="rad_-1"),
          InlineKeyboardButton("+1 ▶", callback_data="rad_+1")],
-        [InlineKeyboardButton("✅ Подтвердить", callback_data="rad_ok")],
+        [InlineKeyboardButton("Подтвердить", callback_data="rad_ok")],
     ])
 
 def kb_dates(loc_name, phase, days_ahead=21):
@@ -836,22 +835,19 @@ def kb_min_players_match():
 def kb_min_players_tourn(val):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("◀ -1", callback_data="mpt_-1"),
-         InlineKeyboardButton(f"👥 {val}", callback_data="mpt_noop"),
          InlineKeyboardButton("+1 ▶", callback_data="mpt_+1")],
         [InlineKeyboardButton("◀ -4", callback_data="mpt_-4"),
          InlineKeyboardButton("+4 ▶", callback_data="mpt_+4")],
-        [InlineKeyboardButton("✅ Подтвердить", callback_data="mpt_ok")],
+        [InlineKeyboardButton("Подтвердить", callback_data="mpt_ok")],
     ])
 
 def kb_level(phase, val):
-    label = f"{'Мин' if phase == 'min' else 'Макс'}: {val:.1f}"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("◀ -0.5", callback_data=f"lvl_{phase}_-0.5"),
-         InlineKeyboardButton(label, callback_data="lvl_noop"),
          InlineKeyboardButton("+0.5 ▶", callback_data=f"lvl_{phase}_+0.5")],
         [InlineKeyboardButton("◀ -1.0", callback_data=f"lvl_{phase}_-1"),
          InlineKeyboardButton("+1.0 ▶", callback_data=f"lvl_{phase}_+1")],
-        [InlineKeyboardButton("✅ Подтвердить", callback_data=f"lvl_{phase}_ok")],
+        [InlineKeyboardButton("Подтвердить", callback_data=f"lvl_{phase}_ok")],
         [InlineKeyboardButton("Любой уровень", callback_data="lvl_any")],
     ])
 
@@ -860,27 +856,22 @@ def fmt_time(h, m):
 
 def kb_time_spinner(phase, h, m):
     """Time spinner 0:00–23:30, step ±1h / ±30min. phase = 'from' or 'to'."""
-    time_label = fmt_time(h, m)
-    title = "🕐 Время ОТ" if phase == "from" else "🕐 Время ДО"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{title}: {time_label}", callback_data="t_noop")],
         [InlineKeyboardButton("◀ -1ч", callback_data=f"t_{phase}_h-1"),
-         InlineKeyboardButton("⏰", callback_data="t_noop"),
          InlineKeyboardButton("+1ч ▶", callback_data=f"t_{phase}_h+1")],
         [InlineKeyboardButton("◀ -30м", callback_data=f"t_{phase}_m-30"),
          InlineKeyboardButton("+30м ▶", callback_data=f"t_{phase}_m+30")],
-        [InlineKeyboardButton("✅ Подтвердить", callback_data=f"t_{phase}_ok")],
-        [InlineKeyboardButton("⏭ Любое время", callback_data=f"t_{phase}_any")],
+        [InlineKeyboardButton("Подтвердить", callback_data=f"t_{phase}_ok")],
+        [InlineKeyboardButton("Любое время", callback_data=f"t_{phase}_any")],
     ])
 
 def kb_frequency(val):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("◀ -10", callback_data="freq_-10"),
-         InlineKeyboardButton(f"🔄 {val} мин", callback_data="freq_noop"),
          InlineKeyboardButton("+10 ▶", callback_data="freq_+10")],
         [InlineKeyboardButton("◀ -1", callback_data="freq_-1"),
          InlineKeyboardButton("+1 ▶", callback_data="freq_+1")],
-        [InlineKeyboardButton("✅ Подтвердить", callback_data="freq_ok")],
+        [InlineKeyboardButton("Подтвердить", callback_data="freq_ok")],
     ])
 
 def summary_text(w):
@@ -967,22 +958,22 @@ async def show_step(source, uid, context):
         phase = w.get("level_phase", "min")
         val = w.get(f"level_{phase}") or (2.0 if phase == "min" else 4.0)
         label = "минимальный" if phase == "min" else "максимальный"
-        await send(f"🎯 <b>Шаг 6/8 — Уровень ({label}):</b>", kb_level(phase, val))
+        await send(f"🎯 <b>Шаг 6/8 — Уровень ({label}):</b>\n\nТекущий: {val:.1f}", kb_level(phase, val))
 
     elif step == "time_from":
+        h, m = w.get("time_from_h", 0), w.get("time_from_m", 0)
         await send(
-            "🕐 <b>Шаг 7/8 — Время начала события ОТ:</b>\n\n"
-            "Фильтр по фактическому времени начала матча/турнира.\n"
-            "Диапазон: 00:00 – 23:30",
-            kb_time_spinner("from", w.get("time_from_h", 0), w.get("time_from_m", 0))
+            f"🕐 <b>Шаг 7/8 — Время начала события ОТ:</b>\n\nТекущее: {fmt_time(h, m)}\n"
+            "Фильтр по фактическому времени начала матча/турнира.",
+            kb_time_spinner("from", h, m)
         )
 
     elif step == "time_to":
+        h, m = w.get("time_to_h", 23), w.get("time_to_m", 30)
         await send(
-            "🕐 <b>Шаг 7/8 — Время начала события ДО:</b>\n\n"
-            "Фильтр по фактическому времени начала матча/турнира.\n"
-            "Диапазон: 00:00 – 23:30",
-            kb_time_spinner("to", w.get("time_to_h", 23), w.get("time_to_m", 30))
+            f"🕐 <b>Шаг 7/8 — Время начала события ДО:</b>\n\nТекущее: {fmt_time(h, m)}\n"
+            "Фильтр по фактическому времени начала матча/турнира.",
+            kb_time_spinner("to", h, m)
         )
 
     elif step == "frequency":
