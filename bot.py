@@ -1007,6 +1007,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⚙️ Настроить мониторинг", callback_data="wiz_begin")],
             [InlineKeyboardButton("🗓 Календарь", callback_data="my_calendar"),
              InlineKeyboardButton("📅 Расписание", callback_data="my_schedule")],
+            [InlineKeyboardButton("📄 PDF календарь", callback_data="pdf_menu")],
             [InlineKeyboardButton("🔔 Мониторинг аккаунта", callback_data="my_watch_toggle")],
         ])
     )
@@ -1092,6 +1093,212 @@ def format_my_schedule(matches, playtomic_user_id):
 
     return "".join(parts)
 
+def render_calendar_pdf(matches, pt_id, start_date, end_date, output_path, location_label=""):
+    """Generate a Google-Calendar-style PDF.
+    start_date, end_date: date objects (inclusive). Up to ~14 days fits well in landscape A4.
+    """
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    import urllib.request
+
+    FONTS_DIR = "/tmp/fonts"
+    os.makedirs(FONTS_DIR, exist_ok=True)
+
+    def fetch_font(url, name):
+        path = os.path.join(FONTS_DIR, name)
+        if not os.path.exists(path):
+            try:
+                urllib.request.urlretrieve(url, path)
+            except Exception:
+                return None
+        return path
+
+    base = "https://github.com/googlefonts/dm-fonts/raw/main/Sans/Exports/"
+    fonts_ok = True
+    for filename, fontname in [("DMSans-Regular.ttf", "DM"), ("DMSans-Medium.ttf", "DM-Med"), ("DMSans-Bold.ttf", "DM-Bold")]:
+        p = fetch_font(base + filename, filename)
+        if p:
+            try:
+                pdfmetrics.registerFont(TTFont(fontname, p))
+            except Exception:
+                fonts_ok = False
+        else:
+            fonts_ok = False
+    F_REG = "DM" if fonts_ok else "Helvetica"
+    F_MED = "DM-Med" if fonts_ok else "Helvetica"
+    F_BOLD = "DM-Bold" if fonts_ok else "Helvetica-Bold"
+
+    # Filter & convert to local time
+    events = []
+    for m in matches:
+        sd = m.get("start_date", "")
+        if not sd or m.get("status") in ("CANCELED", "EXPIRED", "FINISHED"):
+            continue
+        try:
+            dt_utc = datetime.strptime(sd[:16], "%Y-%m-%dT%H:%M").replace(tzinfo=ZoneInfo("UTC"))
+        except Exception:
+            continue
+        # Use first matching location's tz, fallback to user's tz preference, else UTC
+        loc_for_match = m.get("_location") or ""
+        tz_name = LOCATIONS.get(loc_for_match, {}).get("tz")
+        if not tz_name:
+            # Try detecting from any preset matching tenant city, else default to user's wizard locations
+            tz_name = LOCATIONS.get((list(LOCATIONS.keys()) or [""])[0], {}).get("tz", "UTC")
+        try:
+            dt = dt_utc.astimezone(ZoneInfo(tz_name)).replace(tzinfo=None)
+        except Exception:
+            dt = dt_utc.replace(tzinfo=None)
+        if dt.date() < start_date or dt.date() > end_date:
+            continue
+        players = [p for team in m.get("teams", []) for p in team.get("players", [])]
+        max_p = sum(t.get("max_players", 0) for t in m.get("teams", []))
+        cur = len(players)
+        join_info = m.get("join_requests_info") or {}
+        my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
+        is_full = max_p > 0 and cur >= max_p
+        if my_req and my_req.get("status") == "PENDING":
+            kind = "pending"
+        elif is_full:
+            kind = "full"
+        else:
+            kind = "open"
+        end_dt = dt + timedelta(minutes=90)
+        if m.get("end_date"):
+            try:
+                end_utc = datetime.strptime(m["end_date"][:16], "%Y-%m-%dT%H:%M").replace(tzinfo=ZoneInfo("UTC"))
+                end_dt = end_utc.astimezone(ZoneInfo(tz_name)).replace(tzinfo=None)
+            except Exception:
+                pass
+        events.append({
+            "date": dt.date(), "start": dt, "end": end_dt,
+            "title": m.get("location", "?"), "kind": kind,
+            "cur": cur, "max": max_p, "match_id": m.get("match_id", ""),
+        })
+
+    PAGE_W, PAGE_H = landscape(A4)
+    MARGIN_L, MARGIN_R = 14*mm, 14*mm
+    MARGIN_T, MARGIN_B = 22*mm, 12*mm
+    DAYS = [(start_date + timedelta(days=i)) for i in range((end_date - start_date).days + 1)]
+    HEADER_H = 16*mm
+    TIME_COL_W = 14*mm
+    START_HOUR, END_HOUR = 6, 23
+    HOURS = END_HOUR - START_HOUR
+    GRID_X = MARGIN_L + TIME_COL_W
+    GRID_Y_TOP = PAGE_H - MARGIN_T - HEADER_H
+    GRID_Y_BOTTOM = MARGIN_B
+    GRID_W = PAGE_W - MARGIN_L - MARGIN_R - TIME_COL_W
+    GRID_H = GRID_Y_TOP - GRID_Y_BOTTOM
+    COL_W = GRID_W / max(len(DAYS), 1)
+    ROW_H = GRID_H / HOURS
+
+    BG = (0.98, 0.97, 0.94); INK = (0.16, 0.14, 0.11)
+    INK_MUTED = (0.48, 0.47, 0.45); INK_FAINT = (0.73, 0.72, 0.70)
+    GRID = (0.83, 0.82, 0.79); WEEKEND = (0.94, 0.93, 0.89)
+    GREEN_FILL = (0.74, 0.88, 0.66); GREEN_BORDER = (0.27, 0.48, 0.13); GREEN_TEXT = (0.16, 0.30, 0.05)
+    YELLOW_FILL = (1.00, 0.93, 0.65); YELLOW_BORDER = (0.74, 0.55, 0.06); YELLOW_TEXT = (0.40, 0.28, 0.02)
+    BLUE_FILL = (0.74, 0.86, 0.95); BLUE_BORDER = (0.20, 0.45, 0.66); BLUE_TEXT = (0.07, 0.24, 0.40)
+
+    c = canvas.Canvas(output_path, pagesize=landscape(A4))
+    c.setTitle(f"Padel Calendar {start_date} — {end_date}")
+    c.setAuthor("Perplexity Computer")
+    c.setFillColorRGB(*BG); c.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
+
+    title_y = PAGE_H - 10*mm
+    c.setFillColorRGB(*INK); c.setFont(F_BOLD, 16)
+    c.drawString(MARGIN_L, title_y, "Padel Calendar")
+    c.setFont(F_REG, 10); c.setFillColorRGB(*INK_MUTED)
+    sub = f"{start_date.strftime('%d %b')} — {end_date.strftime('%d %b %Y')}"
+    if location_label:
+        sub += f" · {location_label}"
+    c.drawString(MARGIN_L, title_y - 14, sub)
+
+    legend_y = title_y - 4; legend_x = PAGE_W - MARGIN_R
+    c.setFont(F_REG, 9)
+    for fill, border, label in [
+        (BLUE_FILL, BLUE_BORDER, "My request"),
+        (YELLOW_FILL, YELLOW_BORDER, "Open"),
+        (GREEN_FILL, GREEN_BORDER, "Team complete"),
+    ]:
+        text_w = c.stringWidth(label, F_REG, 9)
+        legend_x -= text_w + 9 + 14
+        c.setFillColorRGB(*fill); c.setStrokeColorRGB(*border); c.setLineWidth(0.7)
+        c.roundRect(legend_x, legend_y - 2, 9, 7, 1.5, fill=1, stroke=1)
+        c.setFillColorRGB(*INK)
+        c.drawString(legend_x + 13, legend_y, label)
+
+    DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    for i, d in enumerate(DAYS):
+        cx = GRID_X + i * COL_W
+        if d.weekday() >= 5:
+            c.setFillColorRGB(*WEEKEND)
+            c.rect(cx, GRID_Y_BOTTOM, COL_W, GRID_H, fill=1, stroke=0)
+        c.setFillColorRGB(0.99, 0.99, 0.97)
+        c.rect(cx, GRID_Y_TOP, COL_W, HEADER_H, fill=1, stroke=0)
+        c.setFillColorRGB(*INK_MUTED); c.setFont(F_MED, 8.5)
+        c.drawString(cx + 4, GRID_Y_TOP + HEADER_H - 11, DAY_NAMES[d.weekday()].upper())
+        c.setFillColorRGB(*INK); c.setFont(F_BOLD, 18)
+        c.drawString(cx + 4, GRID_Y_TOP + 4, str(d.day))
+
+    for i in range(HOURS + 1):
+        y = GRID_Y_BOTTOM + (HOURS - i) * ROW_H
+        c.setStrokeColorRGB(*GRID); c.setLineWidth(0.5)
+        if i < HOURS:
+            c.line(MARGIN_L, y, PAGE_W - MARGIN_R, y)
+        hour = START_HOUR + i
+        c.setFillColorRGB(*INK_FAINT); c.setFont(F_REG, 7.5)
+        c.drawRightString(GRID_X - 4, y - 3, f"{hour:02d}:00")
+
+    c.setStrokeColorRGB(*GRID)
+    c.line(MARGIN_L, GRID_Y_TOP, PAGE_W - MARGIN_R, GRID_Y_TOP)
+    c.line(MARGIN_L, GRID_Y_TOP + HEADER_H, PAGE_W - MARGIN_R, GRID_Y_TOP + HEADER_H)
+    for i in range(len(DAYS) + 1):
+        cx = GRID_X + i * COL_W
+        c.line(cx, GRID_Y_BOTTOM, cx, GRID_Y_TOP + HEADER_H)
+
+    def hour_to_y(h_float):
+        return GRID_Y_TOP - (h_float - START_HOUR) * ROW_H
+
+    for ev in sorted(events, key=lambda e: e["start"]):
+        day_idx = (ev["date"] - start_date).days
+        if day_idx < 0 or day_idx >= len(DAYS):
+            continue
+        cx = GRID_X + day_idx * COL_W
+        sh = ev["start"].hour + ev["start"].minute / 60.0
+        eh = ev["end"].hour + ev["end"].minute / 60.0
+        if eh <= sh: eh = sh + 1.5
+        y_top = hour_to_y(sh); y_bot = hour_to_y(eh)
+        h = max(y_top - y_bot, 14)
+        bx = cx + 2; bw = COL_W - 4
+        if ev["kind"] == "full":
+            fill, border, txt = GREEN_FILL, GREEN_BORDER, GREEN_TEXT
+        elif ev["kind"] == "pending":
+            fill, border, txt = BLUE_FILL, BLUE_BORDER, BLUE_TEXT
+        else:
+            fill, border, txt = YELLOW_FILL, YELLOW_BORDER, YELLOW_TEXT
+        c.setFillColorRGB(*fill); c.setStrokeColorRGB(*border); c.setLineWidth(0.8)
+        c.roundRect(bx, y_bot, bw, h, 2, fill=1, stroke=1)
+        c.setFillColorRGB(*border); c.rect(bx, y_bot, 2, h, fill=1, stroke=0)
+        c.setFillColorRGB(*txt); c.setFont(F_BOLD, 8)
+        c.drawString(bx + 5, y_top - 9, f"{ev['start'].strftime('%H:%M')} · {ev['cur']}/{ev['max']}")
+        if h >= 22:
+            c.setFont(F_MED, 7.5)
+            title = ev["title"]
+            max_chars = max(int((bw - 8) / 4.2), 4)
+            if len(title) > max_chars:
+                title = title[:max_chars - 1] + "…"
+            c.drawString(bx + 5, y_top - 19, title)
+        link = f"https://app.playtomic.io/matches/{ev['match_id']}?product_type=open_match"
+        c.linkURL(link, (bx, y_bot, bx + bw, y_top), relative=0)
+
+    c.setFillColorRGB(*INK_FAINT); c.setFont(F_REG, 7)
+    c.drawString(MARGIN_L, MARGIN_B / 2,
+                 f"Generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} · Tap any event to open in Playtomic")
+    c.showPage(); c.save()
+    return len(events)
+
 def format_my_calendar(matches, pt_id, days_ahead=11):
     """Visual calendar grid: days x time-of-day blocks.
     Green emoji = full team (4/4), yellow = open spots, blue = my pending request."""
@@ -1149,6 +1356,71 @@ def format_my_calendar(matches, pt_id, days_ahead=11):
             )
 
     return "\n".join(parts)
+
+async def _send_pdf_calendar(uid, chat_id, context, start_date, end_date, label_extra=""):
+    """Build PDF and send to chat."""
+    u = get_user(uid)
+    pt_id = u.get("playtomic_user_id")
+    if not pt_id:
+        await context.bot.send_message(chat_id,
+            "Сначала сохрани Playtomic ID: <code>/setid 9436699</code>",
+            parse_mode="HTML")
+        return
+    matches = playtomic_user_matches(pt_id)
+    # Determine location label from user's wizard or first match
+    loc_label = ""
+    w = u.get("wizard") or {}
+    locs = w.get("locations") or []
+    if locs:
+        loc_label = ", ".join(locs)
+    out_path = f"{DATA_DIR}/calendar_{uid}_{start_date}_{end_date}.pdf"
+    try:
+        n = render_calendar_pdf(matches, pt_id, start_date, end_date, out_path, location_label=loc_label)
+    except Exception as e:
+        log.exception("PDF render failed")
+        await context.bot.send_message(chat_id, f"Ошибка создания PDF: {e}")
+        return
+    if n == 0:
+        await context.bot.send_message(chat_id,
+            f"В диапазоне {start_date.strftime('%d.%m')}–{end_date.strftime('%d.%m')} нет матчей.")
+        os.remove(out_path) if os.path.exists(out_path) else None
+        return
+    caption = f"🗓 Календарь {start_date.strftime('%d.%m')}–{end_date.strftime('%d.%m.%Y')}\n{n} матчей{label_extra}"
+    with open(out_path, "rb") as f:
+        await context.bot.send_document(chat_id, document=f, filename=os.path.basename(out_path), caption=caption)
+    try:
+        os.remove(out_path)
+    except Exception:
+        pass
+
+async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send PDF calendar. Usage: /pdf  (next 14 days)  |  /pdf 2026-05-05 2026-05-15"""
+    uid = update.effective_user.id
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    today = datetime.utcnow().date()
+    if len(args) >= 2:
+        try:
+            start_date = datetime.strptime(args[0], "%Y-%m-%d").date()
+            end_date = datetime.strptime(args[1], "%Y-%m-%d").date()
+        except ValueError:
+            await update.message.reply_text(
+                "Формат: <code>/pdf 2026-05-05 2026-05-15</code>\n"
+                "Или без аргументов — ближайшие 14 дней.",
+                parse_mode="HTML")
+            return
+        if end_date < start_date:
+            await update.message.reply_text("Конечная дата раньше начальной.")
+            return
+        days = (end_date - start_date).days + 1
+        if days > 21:
+            await update.message.reply_text(f"Диапазон слишком большой ({days} дн.). Максимум 21 день.")
+            return
+    else:
+        start_date = today
+        end_date = today + timedelta(days=13)
+    await update.message.reply_text("🔄 Строю PDF...")
+    await _send_pdf_calendar(uid, chat_id, context, start_date, end_date)
 
 async def cmd_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Visual calendar of upcoming matches."""
@@ -1279,6 +1551,70 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Одобрении/отклонении заявок\n\n"
             f"Отключить: /mywatch"
         )
+        return
+
+    # ── PDF menu ──
+    if data == "pdf_menu":
+        await q.edit_message_text(
+            "<b>📄 PDF календарь</b>\n\n"
+            "Выбери диапазон:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📆 7 дней", callback_data="pdf_7"),
+                 InlineKeyboardButton("📆 14 дней", callback_data="pdf_14"),
+                 InlineKeyboardButton("📆 21 день", callback_data="pdf_21")],
+                [InlineKeyboardButton("🎯 Все даты с матчами", callback_data="pdf_all")],
+                [InlineKeyboardButton("✏️ Произвольный диапазон", callback_data="pdf_custom")],
+            ]))
+        return
+
+    if data and data.startswith("pdf_"):
+        action = data[4:]
+        chat_id = q.message.chat_id
+        today = datetime.utcnow().date()
+        if action == "custom":
+            await q.edit_message_text(
+                "Отправь команду:\n"
+                "<code>/pdf 2026-05-05 2026-05-15</code>\n\n"
+                "(начало — конец, до 21 дня)",
+                parse_mode="HTML")
+            return
+        if action == "all":
+            pt_id = u.get("playtomic_user_id")
+            if not pt_id:
+                await q.edit_message_text("Сначала <code>/setid</code>", parse_mode="HTML")
+                return
+            await q.edit_message_text("🔄 Ищу матчи...")
+            matches = playtomic_user_matches(pt_id)
+            future_dates = []
+            for m in matches:
+                if m.get("status") in ("CANCELED", "EXPIRED", "FINISHED"):
+                    continue
+                sd = m.get("start_date", "")[:10]
+                if sd >= today.isoformat():
+                    future_dates.append(sd)
+            if not future_dates:
+                await context.bot.send_message(chat_id, "Будущих матчей нет.")
+                return
+            start_date = datetime.strptime(min(future_dates), "%Y-%m-%d").date()
+            end_date = datetime.strptime(max(future_dates), "%Y-%m-%d").date()
+            # Cap span
+            if (end_date - start_date).days > 30:
+                end_date = start_date + timedelta(days=30)
+                await context.bot.send_message(chat_id,
+                    f"⚠️ Диапазон обрезан до 30 дней ({start_date}–{end_date}).")
+            await _send_pdf_calendar(uid, chat_id, context, start_date, end_date,
+                                     label_extra=" · все будущие")
+            return
+        # numeric range: 7 / 14 / 21 days
+        try:
+            days = int(action)
+        except ValueError:
+            return
+        start_date = today
+        end_date = today + timedelta(days=days - 1)
+        await q.edit_message_text("🔄 Строю PDF...")
+        await _send_pdf_calendar(uid, chat_id, context, start_date, end_date)
         return
 
     # ── My calendar button ──
@@ -1821,6 +2157,7 @@ def main():
     app.add_handler(CommandHandler("setid", cmd_setid))
     app.add_handler(CommandHandler("mywatch", cmd_my_watch))
     app.add_handler(CommandHandler("calendar", cmd_calendar))
+    app.add_handler(CommandHandler("pdf", cmd_pdf))
     app.add_handler(CallbackQueryHandler(on_callback))
     log.info("Bot starting...")
     app.run_polling(drop_pending_updates=True)
