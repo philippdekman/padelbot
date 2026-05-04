@@ -998,6 +998,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("⚙️ Настроить мониторинг", callback_data="wiz_begin")],
+            [InlineKeyboardButton("📅 Моё расписание", callback_data="my_schedule")],
         ])
     )
 
@@ -1011,6 +1012,115 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for job in context.job_queue.get_jobs_by_name(f"watch_{uid}"):
         job.schedule_removal()
     await update.message.reply_text("⏹ Мониторинг остановлен.")
+
+# ─── My schedule ───────────────────────────────────────────────────
+def playtomic_user_matches(playtomic_user_id):
+    """Get all matches a user is registered in. Returns up to 100 matches."""
+    url = f"{BASE}/matches?sport_id=PADEL&user_id={playtomic_user_id}&size=100"
+    data = api_get(url)
+    return data if isinstance(data, list) else []
+
+def format_my_schedule(matches, playtomic_user_id):
+    """Group user's matches by status and date."""
+    today = datetime.utcnow().date().isoformat()
+    confirmed = []   # CONFIRMED status
+    open_full = []   # PENDING + Phil approved + 4/4 → ready/awaiting confirmation
+    pending_join = []  # Phil's join request is PENDING
+    open_partial = []  # PENDING + spots still open
+
+    for m in matches:
+        if m.get("start_date", "")[:10] < today:
+            continue
+        if m.get("status") in ("CANCELED", "EXPIRED", "FINISHED"):
+            continue
+
+        # Check Phil's join request status
+        join_info = m.get("join_requests_info") or {}
+        my_request = next((r for r in join_info.get("requests", [])
+                           if r.get("user_id") == playtomic_user_id), None)
+
+        # Player is in teams
+        all_players = [p for team in m.get("teams", []) for p in team.get("players", [])]
+        in_team = any(p.get("user_id") == playtomic_user_id for p in all_players)
+        max_p = sum(t.get("max_players", 0) for t in m.get("teams", []))
+        is_full = len(all_players) >= max_p
+
+        if m.get("status") == "CONFIRMED":
+            confirmed.append(m)
+        elif my_request and my_request.get("status") == "PENDING":
+            pending_join.append(m)
+        elif in_team and is_full:
+            open_full.append(m)
+        elif in_team:
+            open_partial.append(m)
+
+    parts = ["<b>📅 Моё расписание</b>\n"]
+
+    def render_section(title, matches_list):
+        if not matches_list:
+            return
+        parts.append(f"\n\n<b>{title}</b> ({len(matches_list)})")
+        for m in sorted(matches_list, key=lambda x: x.get("start_date", "")):
+            dt = parse_dt(m.get("start_date"))
+            # Use match location — don't know which user location "city" is
+            dt_str = dt.strftime("%a %d.%m %H:%M") if dt else "?"
+            for en, ru in DAY_NAMES_RU.items():
+                dt_str = dt_str.replace(en, ru)
+            club = m.get("location", "?")
+            mid = m.get("match_id", "")
+            link = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
+            cur = sum(len(t.get("players", [])) for t in m.get("teams", []))
+            mx = sum(t.get("max_players", 0) for t in m.get("teams", []))
+            parts.append(f"\n  • <b>{dt_str}</b> — {club} ({cur}/{mx}) — <a href=\"{link}\">Открыть</a>")
+
+    render_section("✅ Подтверждённые", confirmed)
+    render_section("⏳ Ожидают подтверждения участников (полный состав)", open_full)
+    render_section("📝 Моя заявка на рассмотрении", pending_join)
+    render_section("⚡ Открытые (ищут игроков)", open_partial)
+
+    if len(parts) == 1:
+        parts.append("\nНичего не запланировано.")
+
+    return "".join(parts)
+
+async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user's upcoming matches grouped by status."""
+    uid = update.effective_user.id
+    u = get_user(uid)
+    pt_id = u.get("playtomic_user_id")
+    if not pt_id:
+        await update.message.reply_text(
+            "Нужен твой Playtomic user_id.\n\n"
+            "Отправь команду: <code>/setid 9436699</code>\n"
+            "(замени на свой ID. Найти его можно в профиле Playtomic — URL profile.playtomic.io/users/<b>9436699</b>)",
+            parse_mode="HTML"
+        )
+        return
+    await update.message.reply_text("🔄 Загружаю расписание...")
+    matches = playtomic_user_matches(pt_id)
+    text = format_my_schedule(matches, pt_id)
+    for chunk in split_message(text):
+        await update.message.reply_text(chunk, parse_mode="HTML", disable_web_page_preview=True)
+
+async def cmd_setid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Save Playtomic user_id for /schedule."""
+    uid = update.effective_user.id
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Использование: <code>/setid 9436699</code>\n\n"
+            "ID можно найти в URL профиля Playtomic.",
+            parse_mode="HTML"
+        )
+        return
+    pt_id = args[0].strip()
+    if not pt_id.isdigit():
+        await update.message.reply_text("ID должен быть числом.")
+        return
+    u = get_user(uid)
+    u["playtomic_user_id"] = pt_id
+    set_user(uid, u)
+    await update.message.reply_text(f"✅ Playtomic ID сохранён: {pt_id}\n\n/schedule — моё расписание")
 
 async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Edit settings without restarting monitoring or losing seen events."""
@@ -1046,6 +1156,25 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data
     u = wiz(uid)
     w = u["wizard"]
+
+    # ── My schedule button ──
+    if data == "my_schedule":
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id:
+            await q.edit_message_text(
+                "Нужен твой Playtomic user_id.\n\n"
+                "Отправь команду: <code>/setid 9436699</code>\n"
+                "(замени на свой. Найти ID можно в URL профиля Playtomic).",
+                parse_mode="HTML"
+            )
+            return
+        await q.edit_message_text("🔄 Загружаю расписание...")
+        matches = playtomic_user_matches(pt_id)
+        text = format_my_schedule(matches, pt_id)
+        chat_id = q.message.chat_id
+        for chunk in split_message(text):
+            await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
+        return
 
     # ── Wizard start/restart (full reset) ──
     if data in ("wiz_begin", "wiz_restart"):
@@ -1362,6 +1491,8 @@ def main():
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("edit", cmd_edit))
+    app.add_handler(CommandHandler("schedule", cmd_schedule))
+    app.add_handler(CommandHandler("setid", cmd_setid))
     app.add_handler(CallbackQueryHandler(on_callback))
     log.info("Bot starting...")
     app.run_polling(drop_pending_updates=True)
