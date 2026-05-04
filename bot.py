@@ -1007,29 +1007,30 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pt_id = u.get("playtomic_user_id")
     if not pt_id:
         await update.message.reply_text(
-            "<b>Padel Monitor Bot</b>\n\n"
-            "Мониторинг матчей и турниров на Playtomic.\n\n"
-            "Чтобы начать, пришли ссылку на свой профиль Playtomic. "
-            "Открой приложение Playtomic → Профиль → Делиться → Telegram и вставь сюда.\n\n"
-            "Пример ссылки:\n"
-            "<code>https://app.playtomic.io/profile/user/9436699</code>\n\n"
-            "После этого будут доступны /schedule, /calendar, /pdf, /mywatch и настройка поиска.",
+            "<b>Padel Monitor</b>\n\n"
+            "Это бот для игроков Playtomic. Он ищет открытые матчи и турниры под твой уровень, "
+            "присылает уведомления, показывает твоё расписание, календарь и PDF.\n\n"
+            "Чтобы начать, пришли ссылку на свой профиль Playtomic. В приложении: "
+            "Профиль → Делиться → выбери Telegram и этот чат. Ссылка выглядит так:\n"
+            "<code>https://app.playtomic.io/profile/user/9436699</code>",
             parse_mode="HTML", disable_web_page_preview=True
         )
         return
 
     await update.message.reply_text(
-        "<b>Padel Monitor Bot</b>\n\n"
-        "Мониторинг матчей и турниров на Playtomic.\n\n"
-            f"Playtomic ID: <code>{pt_id}</code>\n"
-            "Нажми кнопку ниже чтобы настроить поиск:",
+        "<b>Padel Monitor</b>\n\n"
+        "Открытые матчи и турниры Playtomic под твой уровень, "
+        "уведомления о новых слотах, личное расписание и PDF-календарь.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Настроить мониторинг", callback_data="wiz_begin")],
-            [InlineKeyboardButton("Календарь", callback_data="my_calendar"),
-             InlineKeyboardButton("Расписание", callback_data="my_schedule")],
+            [InlineKeyboardButton("Настроить поиск игр", callback_data="wiz_begin")],
+            [InlineKeyboardButton("Моё расписание", callback_data="my_schedule"),
+             InlineKeyboardButton("Календарь", callback_data="my_calendar")],
             [InlineKeyboardButton("PDF календарь", callback_data="pdf_menu")],
-            [InlineKeyboardButton("Мониторинг аккаунта", callback_data="my_watch_toggle")],
+            [InlineKeyboardButton("Уведомления об изменениях в моих матчах", callback_data="my_watch_toggle")],
+            [InlineKeyboardButton("Статус мониторинга", callback_data="show_status"),
+             InlineKeyboardButton("Остановить", callback_data="stop_monitoring")],
+            [InlineKeyboardButton("Сменить аккаунт Playtomic", callback_data="reset_id")],
         ])
     )
 
@@ -1570,6 +1571,74 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = wiz(uid)
     w = u["wizard"]
 
+    # ── Show status ──
+    if data == "show_status":
+        pt_id = u.get("playtomic_user_id") or "не задан"
+        active_search = bool(context.job_queue.get_jobs_by_name(f"watch_{uid}"))
+        active_my = bool(context.job_queue.get_jobs_by_name(f"my_watch_{uid}"))
+        wz = u.get("wizard") or {}
+        text = (
+            f"<b>Статус</b>\n\n"
+            f"Playtomic ID: <code>{pt_id}</code>\n"
+            f"Поиск новых игр: {'включён' if active_search else 'выключен'}\n"
+            f"Мониторинг моих матчей: {'включён' if active_my else 'выключен'}"
+        )
+        if wz:
+            text += "\n\n" + summary_text(wz)
+        await q.edit_message_text(text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return
+
+    # ── Stop monitoring (search) ──
+    if data == "stop_monitoring":
+        u["monitoring_active"] = False
+        set_user(uid, u)
+        for job in context.job_queue.get_jobs_by_name(f"watch_{uid}"):
+            job.schedule_removal()
+        await q.edit_message_text(
+            "Мониторинг поиска остановлен.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return
+
+    # ── Reset Playtomic ID ──
+    if data == "reset_id":
+        u["playtomic_user_id"] = None
+        u["my_account_active"] = False
+        set_user(uid, u)
+        for job in context.job_queue.get_jobs_by_name(f"my_watch_{uid}"):
+            job.schedule_removal()
+        await q.edit_message_text(
+            "Аккаунт Playtomic отвязан. Пришли ссылку на новый профиль или нажми “В меню”.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return
+
+    # ── Back to main menu ──
+    if data == "back_main":
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id:
+            await q.edit_message_text(
+                "<b>Padel Monitor</b>\n\n"
+                "Пришли ссылку на свой профиль Playtomic. В приложении: "
+                "Профиль → Делиться → Telegram. Пример:\n"
+                "<code>https://app.playtomic.io/profile/user/9436699</code>",
+                parse_mode="HTML", disable_web_page_preview=True)
+            return
+        await q.edit_message_text(
+            "<b>Padel Monitor</b>\n\n"
+            "Открытые матчи и турниры Playtomic под твой уровень, уведомления, расписание, PDF.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Настроить поиск игр", callback_data="wiz_begin")],
+                [InlineKeyboardButton("Моё расписание", callback_data="my_schedule"),
+                 InlineKeyboardButton("Календарь", callback_data="my_calendar")],
+                [InlineKeyboardButton("PDF календарь", callback_data="pdf_menu")],
+                [InlineKeyboardButton("Уведомления об изменениях в моих матчах", callback_data="my_watch_toggle")],
+                [InlineKeyboardButton("Статус мониторинга", callback_data="show_status"),
+                 InlineKeyboardButton("Остановить", callback_data="stop_monitoring")],
+                [InlineKeyboardButton("Сменить аккаунт Playtomic", callback_data="reset_id")],
+            ]))
+        return
+
     # ── My account watch toggle ──
     if data == "my_watch_toggle":
         pt_id = u.get("playtomic_user_id")
@@ -1742,9 +1811,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Radius ──
     if data.startswith("rad_"):
         cmd = data[4:]
+        if cmd == "noop":
+            return  # индикатор — не кликабельный
         if cmd == "ok":
             w["step"] = "dates"
-        elif cmd != "noop":
+        else:
             w["radius_km"] = max(1, min(200, w["radius_km"] + int(cmd)))
         set_user(uid, u)
         await show_step(q, uid, context)
@@ -1783,12 +1854,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Min players tournament ──
     if data.startswith("mpt_"):
         cmd = data[4:]
+        if cmd == "noop":
+            return
         if cmd == "ok":
             w["step"] = "level"
             w["level_phase"] = "min"
             if w.get("level_min") is None: w["level_min"] = 2.0
             if w.get("level_max") is None: w["level_max"] = 4.0
-        elif cmd != "noop":
+        else:
             w["min_players_tourn"] = max(0, min(32, w["min_players_tourn"] + int(cmd)))
         set_user(uid, u)
         await show_step(q, uid, context)
@@ -1875,9 +1948,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Frequency ──
     if data.startswith("freq_"):
         cmd = data[5:]
+        if cmd == "noop":
+            return
         if cmd == "ok":
             w["step"] = "confirm"
-        elif cmd != "noop":
+        else:
             w["frequency"] = max(1, min(120, w["frequency"] + int(cmd)))
         set_user(uid, u)
         await show_step(q, uid, context)
