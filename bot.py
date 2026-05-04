@@ -1889,12 +1889,34 @@ async def _courts_handle(q, uid, context, data):
         draft = u.get("court_draft") or {}
         draft["loc_name"] = loc_name
         draft["step"] = "clubs"
-        # Загружаем список клубов в этой локации
         loc = LOCATIONS[loc_name]
         clubs = playtomic_clubs(loc["lat"], loc["lon"], 30000)
-        # Берём первые 20 ближайших
-        draft["clubs_avail"] = [{"id": c.get("tenant_id"), "name": c.get("tenant_name") or c.get("name", "?")}
-                                for c in clubs[:20] if c.get("tenant_id")]
+        # Считаем расстояние от центра (haversine, км)
+        import math
+        def dist_km(lat1, lon1, lat2, lon2):
+            R = 6371.0
+            phi1 = math.radians(lat1); phi2 = math.radians(lat2)
+            dphi = math.radians(lat2 - lat1); dlam = math.radians(lon2 - lon1)
+            a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
+            return 2 * R * math.asin(math.sqrt(a))
+        avail = []
+        for c in clubs:
+            tid = c.get("tenant_id")
+            if not tid: continue
+            addr = (c.get("address") or {})
+            coord = addr.get("coordinate") or {}
+            try:
+                d_km = dist_km(loc["lat"], loc["lon"], float(coord.get("lat")), float(coord.get("lon")))
+            except Exception:
+                d_km = None
+            avail.append({
+                "id": tid,
+                "name": c.get("tenant_name") or c.get("name", "?"),
+                "distance_km": round(d_km, 1) if d_km is not None else None,
+            })
+        # Сортируем по расстоянию и берём ближайшие 25
+        avail.sort(key=lambda x: x["distance_km"] if x["distance_km"] is not None else 9999)
+        draft["clubs_avail"] = avail[:25]
         u["court_draft"] = draft
         set_user(uid, u)
         await _courts_render_clubs(q, uid)
@@ -2094,11 +2116,13 @@ async def _courts_render_clubs(q, uid):
     rows = []
     for c in draft.get("clubs_avail", []):
         mark = "✅ " if c["id"] in sel else ""
-        rows.append([InlineKeyboardButton(f"{mark}{c['name']}", callback_data=f"courts_club_{c['id']}")])
+        dist = c.get("distance_km")
+        suffix = f" ({dist} км)" if dist is not None else ""
+        rows.append([InlineKeyboardButton(f"{mark}{c['name']}{suffix}", callback_data=f"courts_club_{c['id']}")])
     rows.append([InlineKeyboardButton("Далее →", callback_data="courts_clubs_done")])
     rows.append([InlineKeyboardButton("← Назад", callback_data="courts_menu")])
     await q.edit_message_text(
-        f"<b>Шаг 2 — Выбери любимые клубы</b> ({len(sel)} выбрано):",
+        f"<b>Шаг 2 — Выбери любимые клубы</b> ({len(sel)} выбрано, расстояние от центра):",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
 
 
