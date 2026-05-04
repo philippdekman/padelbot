@@ -12,6 +12,7 @@ Features:
 """
 
 import os, json, logging, asyncio, re
+import courts
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import urllib.request, urllib.error
@@ -1064,6 +1065,11 @@ def _main_menu_kb(u, context, uid):
     elif not has_wizard:
         rows.append([InlineKeyboardButton("Настроить постоянный поиск игр", callback_data="wiz_begin")])
     rows.append([InlineKeyboardButton("Разовый поиск (по фильтрам, без мониторинга)", callback_data="oneoff_begin")])
+    courts_on = bool(context.job_queue.get_jobs_by_name(f"courts_{uid}"))
+    rows.append([InlineKeyboardButton(
+        "Свободные корты: выключить" if courts_on else "Свободные корты (отмены/брони)",
+        callback_data="courts_menu"
+    )])
     my_on = bool(context.job_queue.get_jobs_by_name(f"my_watch_{uid}"))
     rows += [
         [InlineKeyboardButton("Мои матчи — добавить в календарь, открыть маршрут", callback_data="my_schedule")],
@@ -1707,6 +1713,483 @@ async def _render_pick_days(q, all_days, picked):
     rows.append([InlineKeyboardButton("← Назад", callback_data="my_schedule")])
     txt = f"<b>Выбери дни для экспорта</b>\nВыбрано: {len(picked)}"
     await q.edit_message_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+
+# ─── Свободные корты ───
+async def _courts_render_menu(q, uid, context):
+    u = get_user(uid)
+    presets = u.get("court_presets", [])
+    active_watch = u.get("court_watch")
+    job_running = bool(context.job_queue.get_jobs_by_name(f"courts_{uid}"))
+    rows = []
+    if active_watch and job_running:
+        idx = active_watch.get("preset_idx", -1)
+        nm = (presets[idx]["name"] if 0 <= idx < len(presets) else active_watch.get("name", "Активный"))
+        rows.append([InlineKeyboardButton(f"✅ Активен: {nm}", callback_data="courts_active")])
+        rows.append([InlineKeyboardButton("Остановить мониторинг", callback_data="courts_stop")])
+    for i, p in enumerate(presets):
+        rows.append([InlineKeyboardButton(f"Пресет: {p.get('name','?')}", callback_data=f"courts_p_{i}")])
+    rows.append([InlineKeyboardButton("Новый пресет / поиск", callback_data="courts_new")])
+    rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
+    msg = ("<b>Свободные корты</b>\n\n"
+           "Мониторят отмены/новые слоты в выбранных клубах. Проверка каждые 10 мин. "
+           "Авто-стоп когда все окна в прошлом.")
+    await q.edit_message_text(msg, parse_mode="HTML", disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup(rows))
+
+
+def _ensure_courts_state(uid):
+    u = get_user(uid)
+    if "court_draft" not in u:
+        u["court_draft"] = None
+    return u
+
+
+async def _courts_handle(q, uid, context, data):
+    """Returns True if handled."""
+    u = _ensure_courts_state(uid)
+
+    if data == "courts_active":
+        watch = u.get("court_watch") or {}
+        text = ("<b>Активный мониторинг свободных кортов</b>\n\n"
+                + courts.format_preset_summary(watch))
+        await q.edit_message_text(text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Показать свободные сейчас", callback_data="courts_show_now")],
+                [InlineKeyboardButton("Остановить", callback_data="courts_stop")],
+                [InlineKeyboardButton("← Назад", callback_data="courts_menu")],
+            ]))
+        return True
+
+    if data == "courts_stop":
+        u["court_watch"] = None
+        set_user(uid, u)
+        for job in context.job_queue.get_jobs_by_name(f"courts_{uid}"):
+            job.schedule_removal()
+        await q.edit_message_text("Мониторинг свободных кортов остановлен.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return True
+
+    if data == "courts_show_now":
+        watch = u.get("court_watch")
+        if not watch:
+            await q.edit_message_text("Сначала настрой пресет.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="courts_menu")]]))
+            return True
+        await q.edit_message_text("Ищу свободные корты...")
+        loc_name = watch.get("loc_name") or "Limassol"
+        tz_str = LOCATIONS.get(loc_name, {}).get("tz", "UTC")
+        slots = courts.collect_slots(watch, ZoneInfo(tz_str))
+        chat_id = q.message.chat_id
+        if not slots:
+            await context.bot.send_message(chat_id, "Ничего не найдено по фильтрам.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="courts_menu")]]))
+        else:
+            text = courts.format_new_slots(slots, watch.get("tenant_names", {}))
+            for chunk in split_message(text):
+                await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
+            await context.bot.send_message(chat_id, "—",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="courts_menu")]]))
+        return True
+
+    if data and data.startswith("courts_p_"):
+        try:
+            idx = int(data[len("courts_p_"):])
+        except ValueError:
+            return True
+        presets = u.get("court_presets", [])
+        if not (0 <= idx < len(presets)):
+            await q.edit_message_text("Пресет не найден.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="courts_menu")]]))
+            return True
+        p = presets[idx]
+        text = courts.format_preset_summary(p)
+        await q.edit_message_text(text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Запустить мониторинг", callback_data=f"courts_run_{idx}")],
+                [InlineKeyboardButton("Посмотреть сейчас", callback_data=f"courts_peek_{idx}")],
+                [InlineKeyboardButton("Изменить даты", callback_data=f"courts_dates_{idx}")],
+                [InlineKeyboardButton("Удалить", callback_data=f"courts_del_{idx}")],
+                [InlineKeyboardButton("← Назад", callback_data="courts_menu")],
+            ]))
+        return True
+
+    if data and data.startswith("courts_run_"):
+        try: idx = int(data[len("courts_run_"):])
+        except: return True
+        presets = u.get("court_presets", [])
+        if not (0 <= idx < len(presets)):
+            return True
+        p = dict(presets[idx])
+        p["preset_idx"] = idx
+        u["court_watch"] = p
+        u["court_seen"] = []
+        u["chat_id"] = q.message.chat_id
+        set_user(uid, u)
+        for job in context.job_queue.get_jobs_by_name(f"courts_{uid}"):
+            job.schedule_removal()
+        context.job_queue.run_repeating(
+            watch_courts, interval=600, first=10,
+            name=f"courts_{uid}",
+            data={"uid": uid, "chat_id": q.message.chat_id},
+        )
+        await q.edit_message_text(
+            f"Мониторинг запущен. Проверка каждые 10 мин. Авто-стоп после последнего окна.\n\n"
+            + courts.format_preset_summary(p),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return True
+
+    if data and data.startswith("courts_peek_"):
+        try: idx = int(data[len("courts_peek_"):])
+        except: return True
+        presets = u.get("court_presets", [])
+        if not (0 <= idx < len(presets)): return True
+        p = presets[idx]
+        await q.edit_message_text("Ищу...")
+        chat_id = q.message.chat_id
+        loc_name = p.get("loc_name") or "Limassol"
+        tz_str = LOCATIONS.get(loc_name, {}).get("tz", "UTC")
+        slots = courts.collect_slots(p, ZoneInfo(tz_str))
+        if not slots:
+            await context.bot.send_message(chat_id, "Ничего не найдено.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="courts_menu")]]))
+        else:
+            text = courts.format_new_slots(slots, p.get("tenant_names", {}))
+            for chunk in split_message(text):
+                await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
+            await context.bot.send_message(chat_id, "—",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="courts_menu")]]))
+        return True
+
+    if data and data.startswith("courts_del_"):
+        try: idx = int(data[len("courts_del_"):])
+        except: return True
+        presets = u.get("court_presets", [])
+        if 0 <= idx < len(presets):
+            presets.pop(idx)
+            u["court_presets"] = presets
+            set_user(uid, u)
+        await _courts_render_menu(q, uid, context)
+        return True
+
+    if data == "courts_new":
+        # Начать создание драфта: выбор локации
+        u["court_draft"] = {"step": "loc", "clubs": [], "windows": []}
+        set_user(uid, u)
+        rows = [[InlineKeyboardButton(name, callback_data=f"courts_loc_{name}")] for name in LOCATIONS]
+        rows.append([InlineKeyboardButton("← Назад", callback_data="courts_menu")])
+        await q.edit_message_text("<b>Шаг 1 — Город:</b>", parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(rows))
+        return True
+
+    if data and data.startswith("courts_loc_"):
+        loc_name = data[len("courts_loc_"):]
+        if loc_name not in LOCATIONS:
+            return True
+        draft = u.get("court_draft") or {}
+        draft["loc_name"] = loc_name
+        draft["step"] = "clubs"
+        # Загружаем список клубов в этой локации
+        loc = LOCATIONS[loc_name]
+        clubs = playtomic_clubs(loc["lat"], loc["lon"], 30000)
+        # Берём первые 20 ближайших
+        draft["clubs_avail"] = [{"id": c.get("tenant_id"), "name": c.get("tenant_name") or c.get("name", "?")}
+                                for c in clubs[:20] if c.get("tenant_id")]
+        u["court_draft"] = draft
+        set_user(uid, u)
+        await _courts_render_clubs(q, uid)
+        return True
+
+    if data and data.startswith("courts_club_"):
+        cid = data[len("courts_club_"):]
+        draft = u.get("court_draft") or {}
+        sel = set(draft.get("clubs", []))
+        if cid in sel: sel.discard(cid)
+        else: sel.add(cid)
+        draft["clubs"] = list(sel)
+        u["court_draft"] = draft
+        set_user(uid, u)
+        await _courts_render_clubs(q, uid)
+        return True
+
+    if data == "courts_clubs_done":
+        draft = u.get("court_draft") or {}
+        if not draft.get("clubs"):
+            await q.answer("Выбери хотя бы один клуб", show_alert=True)
+            return True
+        draft["step"] = "date_from"
+        u["court_draft"] = draft
+        set_user(uid, u)
+        await _courts_render_dates(q, uid, "from")
+        return True
+
+    if data and data.startswith("courts_dfrom_"):
+        d = data[len("courts_dfrom_"):]
+        draft = u.get("court_draft") or {}
+        draft["date_from"] = d
+        draft["step"] = "date_to"
+        u["court_draft"] = draft
+        set_user(uid, u)
+        await _courts_render_dates(q, uid, "to")
+        return True
+
+    if data and data.startswith("courts_dto_"):
+        d = data[len("courts_dto_"):]
+        draft = u.get("court_draft") or {}
+        draft["date_to"] = d
+        draft["step"] = "window"
+        draft["win_idx"] = 0
+        draft["win_from"] = None
+        u["court_draft"] = draft
+        set_user(uid, u)
+        await _courts_render_window(q, uid)
+        return True
+
+    if data and data.startswith("courts_winf_"):
+        t = data[len("courts_winf_"):]  # HH:MM
+        draft = u.get("court_draft") or {}
+        draft["win_from"] = t
+        u["court_draft"] = draft
+        set_user(uid, u)
+        await _courts_render_window(q, uid)
+        return True
+
+    if data and data.startswith("courts_wint_"):
+        t = data[len("courts_wint_"):]
+        draft = u.get("court_draft") or {}
+        wf = draft.get("win_from")
+        if not wf:
+            await q.answer("Сначала выбери начало", show_alert=True)
+            return True
+        windows = draft.get("windows", [])
+        windows.append({"from": wf, "to": t})
+        draft["windows"] = windows
+        draft["win_from"] = None
+        u["court_draft"] = draft
+        set_user(uid, u)
+        await _courts_render_window(q, uid)
+        return True
+
+    if data == "courts_win_done":
+        draft = u.get("court_draft") or {}
+        if not draft.get("windows"):
+            # Окно по умолчанию — весь день
+            draft["windows"] = [{"from": "00:00", "to": "23:59"}]
+        draft["step"] = "duration"
+        u["court_draft"] = draft
+        set_user(uid, u)
+        rows = [
+            [InlineKeyboardButton("60 мин", callback_data="courts_dur_60"),
+             InlineKeyboardButton("90 мин", callback_data="courts_dur_90"),
+             InlineKeyboardButton("120 мин", callback_data="courts_dur_120")],
+            [InlineKeyboardButton("←", callback_data="courts_menu")],
+        ]
+        await q.edit_message_text("<b>Минимальная длительность слота:</b>",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+        return True
+
+    if data and data.startswith("courts_dur_"):
+        try: dur = int(data[len("courts_dur_"):])
+        except: return True
+        draft = u.get("court_draft") or {}
+        draft["min_duration"] = dur
+        # Сразу предлагаем сохранить или запустить
+        draft["step"] = "finish"
+        u["court_draft"] = draft
+        set_user(uid, u)
+        # Генерируем имена клубов
+        names = {c["id"]: c["name"] for c in draft.get("clubs_avail", []) if c["id"] in draft.get("clubs", [])}
+        # Превью пресета
+        preset = {
+            "name": draft.get("name") or f"{draft.get('loc_name')} {draft['date_from']}–{draft['date_to']}",
+            "tenant_ids": draft["clubs"],
+            "tenant_names": names,
+            "loc_name": draft["loc_name"],
+            "date_from": draft["date_from"],
+            "date_to": draft["date_to"],
+            "windows": draft["windows"],
+            "min_duration": draft["min_duration"],
+        }
+        draft["_preview"] = preset
+        u["court_draft"] = draft
+        set_user(uid, u)
+        await q.edit_message_text(
+            "<b>Проверь параметры:</b>\n\n" + courts.format_preset_summary(preset),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Запустить мониторинг", callback_data="courts_save_run")],
+                [InlineKeyboardButton("Сохранить пресет (без мониторинга)", callback_data="courts_save_only")],
+                [InlineKeyboardButton("Показать свободные сейчас без сохранения", callback_data="courts_show_draft")],
+                [InlineKeyboardButton("Отмена", callback_data="courts_menu")],
+            ]))
+        return True
+
+    if data == "courts_save_only":
+        draft = u.get("court_draft") or {}
+        preset = draft.get("_preview")
+        if not preset: return True
+        presets = u.get("court_presets", [])
+        presets.append(preset)
+        u["court_presets"] = presets
+        u["court_draft"] = None
+        set_user(uid, u)
+        await q.edit_message_text(
+            f"Пресет «{preset['name']}» сохранён.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return True
+
+    if data == "courts_save_run":
+        draft = u.get("court_draft") or {}
+        preset = draft.get("_preview")
+        if not preset: return True
+        presets = u.get("court_presets", [])
+        presets.append(preset)
+        idx = len(presets) - 1
+        u["court_presets"] = presets
+        u["court_draft"] = None
+        watch_p = dict(preset); watch_p["preset_idx"] = idx
+        u["court_watch"] = watch_p
+        u["court_seen"] = []
+        u["chat_id"] = q.message.chat_id
+        set_user(uid, u)
+        for job in context.job_queue.get_jobs_by_name(f"courts_{uid}"):
+            job.schedule_removal()
+        context.job_queue.run_repeating(
+            watch_courts, interval=600, first=10,
+            name=f"courts_{uid}",
+            data={"uid": uid, "chat_id": q.message.chat_id},
+        )
+        await q.edit_message_text(
+            f"Пресет сохранён и мониторинг запущен. Первая проверка через несколько секунд.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return True
+
+    if data == "courts_show_draft":
+        draft = u.get("court_draft") or {}
+        preset = draft.get("_preview")
+        if not preset: return True
+        await q.edit_message_text("Ищу...")
+        chat_id = q.message.chat_id
+        loc_name = preset.get("loc_name") or "Limassol"
+        tz_str = LOCATIONS.get(loc_name, {}).get("tz", "UTC")
+        slots = courts.collect_slots(preset, ZoneInfo(tz_str))
+        if not slots:
+            await context.bot.send_message(chat_id, "Ничего не найдено.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="courts_menu")]]))
+        else:
+            text = courts.format_new_slots(slots, preset.get("tenant_names", {}))
+            for chunk in split_message(text):
+                await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
+            await context.bot.send_message(chat_id, "—",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="courts_menu")]]))
+        return True
+
+    return False
+
+
+async def _courts_render_clubs(q, uid):
+    u = get_user(uid)
+    draft = u.get("court_draft") or {}
+    sel = set(draft.get("clubs", []))
+    rows = []
+    for c in draft.get("clubs_avail", []):
+        mark = "✅ " if c["id"] in sel else ""
+        rows.append([InlineKeyboardButton(f"{mark}{c['name']}", callback_data=f"courts_club_{c['id']}")])
+    rows.append([InlineKeyboardButton("Далее →", callback_data="courts_clubs_done")])
+    rows.append([InlineKeyboardButton("← Назад", callback_data="courts_menu")])
+    await q.edit_message_text(
+        f"<b>Шаг 2 — Выбери любимые клубы</b> ({len(sel)} выбрано):",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def _courts_render_dates(q, uid, phase):
+    today = datetime.utcnow().date()
+    rows, row = [], []
+    for i in range(21):
+        d = today + timedelta(days=i)
+        cb = f"courts_d{phase[0]}from_{d.isoformat()}" if phase == "from" else f"courts_dto_{d.isoformat()}"
+        cb = f"courts_dfrom_{d.isoformat()}" if phase == "from" else f"courts_dto_{d.isoformat()}"
+        row.append(InlineKeyboardButton(d.strftime("%d.%m"), callback_data=cb))
+        if len(row) == 5:
+            rows.append(row); row = []
+    if row: rows.append(row)
+    rows.append([InlineKeyboardButton("← Назад", callback_data="courts_menu")])
+    label = "Начальная дата" if phase == "from" else "Конечная дата"
+    await q.edit_message_text(f"<b>Шаг 3 — {label}:</b>", parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows))
+
+
+def _hours_kb(prefix):
+    rows, row = [], []
+    for h in range(7, 23):
+        for m in (0, 30):
+            row.append(InlineKeyboardButton(f"{h:02d}:{m:02d}", callback_data=f"{prefix}_{h:02d}:{m:02d}"))
+            if len(row) == 4:
+                rows.append(row); row = []
+    if row: rows.append(row)
+    return rows
+
+
+async def _courts_render_window(q, uid):
+    u = get_user(uid)
+    draft = u.get("court_draft") or {}
+    windows = draft.get("windows", [])
+    win_from = draft.get("win_from")
+    n = len(windows)
+    txt_lines = [f"<b>Шаг 4 — Окна времени начала слотов</b> ({n}/3)"]
+    if windows:
+        txt_lines.append("")
+        for w in windows:
+            txt_lines.append(f"  {w['from']}–{w['to']}")
+    if win_from:
+        txt_lines.append(f"\nНачало выбрано: {win_from}. Выбери конец:")
+        rows = _hours_kb("courts_wint")
+    else:
+        if n >= 3:
+            txt_lines.append("\nДостигнут лимит в 3 окна.")
+            rows = []
+        else:
+            txt_lines.append("\nВыбери начало времени:")
+            rows = _hours_kb("courts_winf")
+    rows.append([InlineKeyboardButton("Готово →", callback_data="courts_win_done")])
+    rows.append([InlineKeyboardButton("← Назад", callback_data="courts_menu")])
+    await q.edit_message_text("\n".join(txt_lines), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def watch_courts(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic check of free court slots. Auto-stops when preset expired."""
+    uid = context.job.data["uid"]
+    chat_id = context.job.data["chat_id"]
+    u = get_user(uid)
+    watch = u.get("court_watch")
+    if not watch:
+        context.job.schedule_removal(); return
+    loc_name = watch.get("loc_name") or "Limassol"
+    tz = ZoneInfo(LOCATIONS.get(loc_name, {}).get("tz", "UTC"))
+    if courts.is_preset_expired(watch, tz):
+        u["court_watch"] = None
+        set_user(uid, u)
+        context.job.schedule_removal()
+        await context.bot.send_message(chat_id,
+            "Мониторинг свободных кортов автоматически остановлен — все окна уже в прошлом.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return
+    slots = courts.collect_slots(watch, tz)
+    seen = set(u.get("court_seen", []))
+    new_slots = [s for s in slots if s["key"] not in seen]
+    if new_slots:
+        # Помечаем всё видимое как seen
+        u["court_seen"] = list({s["key"] for s in slots})
+        set_user(uid, u)
+        text = courts.format_new_slots(new_slots, watch.get("tenant_names", {}))
+        for chunk in split_message(text):
+            await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
+    else:
+        # Даже если ничего нового — обновим базу (чтобы исчезнувшие не оставались)
+        u["court_seen"] = list({s["key"] for s in slots})
+        set_user(uid, u)
+
 
 NEED_LINK_TEXT = (
     "Пришли ссылку на свой профиль Playtomic. В приложении: "
@@ -2379,6 +2862,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("Отменено. Настройки мониторинга сохранены.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
         return
+
+    # ─── Свободные корты ───
+    if data == "courts_menu":
+        await _courts_render_menu(q, uid, context)
+        return
+    if data and data.startswith("courts_") :
+        handled = await _courts_handle(q, uid, context, data)
+        if handled:
+            return
 
     # ── Разовый поиск ──
     if data == "oneoff_begin":
