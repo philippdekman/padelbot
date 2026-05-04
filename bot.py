@@ -1850,13 +1850,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for job in context.job_queue.get_jobs_by_name(f"my_watch_{uid}"):
             job.schedule_removal()
         context.job_queue.run_repeating(
-            watch_my_account, interval=600, first=30,
+            watch_my_account, interval=180, first=15,
             name=f"my_watch_{uid}",
             data={"uid": uid, "chat_id": q.message.chat_id},
         )
         await q.edit_message_text(
             f"✅ Мониторинг моего аккаунта включён.\n\n"
-            f"Отслеживаю {len(new_states)} матчей, проверка каждые 10 мин.\n\n"
+            f"Отслеживаю {len(new_states)} матчей, проверка каждые 3 мин.\n\n"
             f"Буду сообщать о:\n"
             f"• Статусе матча (CONFIRMED/CANCELED)\n"
             f"• Входе/выходе игроков\n"
@@ -2000,11 +2000,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         added = get_added(uid)
         # Сверху — быстрый экспорт всего и диапазоны
         await context.bot.send_message(chat_id,
-            f"<b>Расписание — {len(upcoming)} матчей</b>\n\nДобавь всё в календарь одним файлом или отметь отдельные игры ниже.",
+            f"<b>Расписание — {len(upcoming)} матчей</b>\n\n"
+            "<b>Добавить все игры в календарь</b> — бот пришлёт один файл. "
+            "Нажми на него — и все матчи добавятся в Google/Apple/Outlook календарь одним нажатием.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(".ics — всё", callback_data="ics_all")],
-                [InlineKeyboardButton("Неделя", callback_data="ics_w"),
+                [InlineKeyboardButton("Добавить все игры в календарь", callback_data="ics_all")],
+                [InlineKeyboardButton("Только неделя", callback_data="ics_w"),
                  InlineKeyboardButton("2 недели", callback_data="ics_2w"),
                  InlineKeyboardButton("Месяц", callback_data="ics_m")],
             ]))
@@ -2034,11 +2036,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons = []
             gc = gcal_link(m)
             gm = gmaps_link(m)
-            row1 = []
-            if gc: row1.append(InlineKeyboardButton("Google Calendar", url=gc))
-            row1.append(InlineKeyboardButton("Apple/Outlook (.ics)", callback_data=f"ics1_{mid}"))
-            buttons.append(row1)
-            row2 = [InlineKeyboardButton("Playtomic", url=link_match)]
+            if gc:
+                buttons.append([InlineKeyboardButton("Добавить в Google Calendar", url=gc)])
+            buttons.append([InlineKeyboardButton("Добавить в Apple/Outlook календарь", callback_data=f"ics1_{mid}")])
+            row2 = [InlineKeyboardButton("Открыть Playtomic", url=link_match)]
             if gm: row2.append(InlineKeyboardButton("Маршрут", url=gm))
             buttons.append(row2)
             mark_label = "✅ Добавлено — снять отметку" if mid in added else "Отметить как добавленное"
@@ -2598,11 +2599,11 @@ async def cmd_my_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for job in context.job_queue.get_jobs_by_name(f"my_watch_{uid}"):
         job.schedule_removal()
     context.job_queue.run_repeating(
-        watch_my_account, interval=600, first=30,
+        watch_my_account, interval=180, first=15,
         name=f"my_watch_{uid}", data={"uid": uid, "chat_id": chat_id},
     )
     await update.message.reply_text(
-        f"✅ Мониторинг моего аккаунта включён (проверка каждые 10 мин).\n\n"
+        f"✅ Мониторинг моего аккаунта включён (проверка каждые 3 мин).\n\n"
         f"Отслеживаю: {len(new_states)} матчей\n\n"
         f"Буду сообщать о:\n"
         f"  • Изменении статуса матча (CONFIRMED/CANCELED)\n"
@@ -2679,7 +2680,7 @@ async def post_init(application):
         # My-account monitoring
         if cfg.get("my_account_active") and cfg.get("playtomic_user_id"):
             application.job_queue.run_repeating(
-                watch_my_account, interval=600, first=600,
+                watch_my_account, interval=180, first=30,
                 name=f"my_watch_{uid}", data={"uid": uid, "chat_id": chat_id},
             )
             my_restored += 1
