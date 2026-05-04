@@ -80,6 +80,30 @@ def set_user(uid: int, cfg: dict):
     data[str(uid)] = cfg
     save_all_settings(data)
 
+def get_added(uid: int) -> set:
+    return set(get_user(uid).get("calendar_added", []))
+
+def toggle_added(uid: int, mid: str) -> bool:
+    """Toggle 'added to calendar' for a match. Returns new state."""
+    u = get_user(uid)
+    added = set(u.get("calendar_added", []))
+    if mid in added:
+        added.discard(mid); state = False
+    else:
+        added.add(mid); state = True
+    u["calendar_added"] = list(added)
+    set_user(uid, u)
+    return state
+
+def mark_added(uid: int, mid: str):
+    """Mark match as added (idempotent)."""
+    u = get_user(uid)
+    added = set(u.get("calendar_added", []))
+    if mid not in added:
+        added.add(mid)
+        u["calendar_added"] = list(added)
+        set_user(uid, u)
+
 # ─── HTTP helpers ───────────────────────────────────────────────────
 def api_get(url: str, timeout: int = 20):
     req = urllib.request.Request(url, headers={
@@ -1043,6 +1067,119 @@ def playtomic_user_matches(playtomic_user_id):
     data = api_get(url)
     return data if isinstance(data, list) else []
 
+# ─── Calendar / Maps deep-links ───
+import urllib.parse
+
+def _match_local_dt(m):
+    """Get start/end datetimes as UTC-aware. Playtomic API returns naive datetime in UTC."""
+    sd = m.get("start_date")
+    ed = m.get("end_date")
+    if not sd:
+        return None, None
+    try:
+        utc = ZoneInfo("UTC")
+        start_utc = datetime.strptime(sd[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=utc)
+        end_utc = (datetime.strptime(ed[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=utc)
+                   if ed else start_utc + timedelta(minutes=90))
+        return start_utc, end_utc
+    except Exception:
+        return None, None
+
+def gcal_link(m):
+    """Google Calendar deep-link to add the match as event."""
+    start, end = _match_local_dt(m)
+    if not start:
+        return None
+    fmt = "%Y%m%dT%H%M%SZ"
+    s_utc = start.astimezone(ZoneInfo("UTC")).strftime(fmt)
+    e_utc = end.astimezone(ZoneInfo("UTC")).strftime(fmt)
+    title = f"Padel — {m.get('location') or 'Match'}"
+    mid = m.get("match_id", "")
+    addr_obj = ((m.get("location_info") or {}).get("address")
+                or (m.get("tenant") or {}).get("address") or {})
+    addr = ", ".join(filter(None, [addr_obj.get("street"), addr_obj.get("city"), addr_obj.get("country")])) or m.get("location", "")
+    details = f"Playtomic match: https://app.playtomic.io/matches/{mid}?product_type=open_match"
+    params = {
+        "action": "TEMPLATE",
+        "text": title,
+        "dates": f"{s_utc}/{e_utc}",
+        "details": details,
+        "location": addr,
+    }
+    return "https://calendar.google.com/calendar/render?" + urllib.parse.urlencode(params)
+
+def gmaps_link(m):
+    """Google Maps directions link based on venue name + address."""
+    addr_obj = ((m.get("location_info") or {}).get("address")
+                or (m.get("tenant") or {}).get("address") or {})
+    coord = addr_obj.get("coordinate") or {}
+    if coord.get("lat") and coord.get("lon"):
+        q = f"{coord['lat']},{coord['lon']}"
+    else:
+        q = ", ".join(filter(None, [m.get("location"), addr_obj.get("street"), addr_obj.get("city")])) or m.get("location", "")
+    return "https://www.google.com/maps/search/?" + urllib.parse.urlencode({"api": "1", "query": q})
+
+def _ics_escape(s: str) -> str:
+    return (s or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+def build_ics(matches, pt_id, start_d=None, end_d=None):
+    """Build an .ics calendar file with the user's matches.
+    Filters: only future matches the user is in (or has pending join request); excludes CANCELED/EXPIRED/FINISHED.
+    Optional date range (inclusive).
+    """
+    today = datetime.utcnow().date()
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//PadelMonitor//RU", "CALSCALE:GREGORIAN", "METHOD:PUBLISH"]
+    cnt = 0
+    for m in sorted(matches, key=lambda x: x.get("start_date", "")):
+        if m.get("status") in ("CANCELED", "EXPIRED", "FINISHED"):
+            continue
+        sd = m.get("start_date", "")[:10]
+        if not sd or sd < today.isoformat():
+            continue
+        try:
+            d = datetime.strptime(sd, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if start_d and d < start_d: continue
+        if end_d and d > end_d: continue
+        # only matches user is in or has request to
+        join_info = m.get("join_requests_info") or {}
+        my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
+        in_team = any(p.get("user_id") == pt_id
+                      for t in m.get("teams", []) for p in t.get("players", []))
+        if not in_team and not my_req:
+            continue
+        start, end = _match_local_dt(m)
+        if not start:
+            continue
+        fmt = "%Y%m%dT%H%M%SZ"
+        dtstart = start.astimezone(ZoneInfo("UTC")).strftime(fmt)
+        dtend = end.astimezone(ZoneInfo("UTC")).strftime(fmt)
+        mid = m.get("match_id", "")
+        addr_obj = ((m.get("location_info") or {}).get("address")
+                    or (m.get("tenant") or {}).get("address") or {})
+        addr = ", ".join(filter(None, [addr_obj.get("street"), addr_obj.get("city"), addr_obj.get("country")])) or m.get("location", "")
+        url = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
+        title = f"Padel — {m.get('location') or 'Match'}"
+        cur = sum(len(t.get("players", [])) for t in m.get("teams", []))
+        mx = sum(t.get("max_players", 0) for t in m.get("teams", []))
+        desc = f"Playtomic match. Players: {cur}/{mx}. Status: {m.get('status')}. Open: {url}"
+        lines += [
+            "BEGIN:VEVENT",
+            f"UID:{mid}@padel-monitor",
+            f"DTSTAMP:{datetime.utcnow().strftime(fmt)}",
+            f"DTSTART:{dtstart}",
+            f"DTEND:{dtend}",
+            f"SUMMARY:{_ics_escape(title)}",
+            f"LOCATION:{_ics_escape(addr)}",
+            f"DESCRIPTION:{_ics_escape(desc)}",
+            f"URL:{url}",
+            "END:VEVENT",
+        ]
+        cnt += 1
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines), cnt
+
 def format_my_schedule(matches, playtomic_user_id):
     """Group user's matches by status and date."""
     today = datetime.utcnow().date().isoformat()
@@ -1106,7 +1243,7 @@ def format_my_schedule(matches, playtomic_user_id):
 
     return "".join(parts)
 
-def render_calendar_pdf(matches, pt_id, start_date, end_date, output_path, location_label=""):
+def render_calendar_pdf(matches, pt_id, start_date, end_date, output_path, location_label="", added_set=None):
     """Generate a Google-Calendar-style PDF.
     start_date, end_date: date objects (inclusive). Up to ~14 days fits well in landscape A4.
     """
@@ -1189,6 +1326,7 @@ def render_calendar_pdf(matches, pt_id, start_date, end_date, output_path, locat
             "date": dt.date(), "start": dt, "end": end_dt,
             "title": m.get("location", "?"), "kind": kind,
             "cur": cur, "max": max_p, "match_id": m.get("match_id", ""),
+            "added": bool(added_set and m.get("match_id") in added_set),
         })
 
     PAGE_W, PAGE_H = landscape(A4)
@@ -1295,7 +1433,8 @@ def render_calendar_pdf(matches, pt_id, start_date, end_date, output_path, locat
         c.roundRect(bx, y_bot, bw, h, 2, fill=1, stroke=1)
         c.setFillColorRGB(*border); c.rect(bx, y_bot, 2, h, fill=1, stroke=0)
         c.setFillColorRGB(*txt); c.setFont(F_BOLD, 8)
-        c.drawString(bx + 5, y_top - 9, f"{ev['start'].strftime('%H:%M')} · {ev['cur']}/{ev['max']}")
+        prefix = "✓ " if ev.get("added") else ""
+        c.drawString(bx + 5, y_top - 9, f"{prefix}{ev['start'].strftime('%H:%M')} · {ev['cur']}/{ev['max']}")
         if h >= 22:
             c.setFont(F_MED, 7.5)
             title = ev["title"]
@@ -1312,9 +1451,10 @@ def render_calendar_pdf(matches, pt_id, start_date, end_date, output_path, locat
     c.showPage(); c.save()
     return len(events)
 
-def format_my_calendar(matches, pt_id, days_ahead=11):
+def format_my_calendar(matches, pt_id, days_ahead=11, added_set=None):
     """Visual calendar grid: days x time-of-day blocks.
-    Green emoji = full team (4/4), yellow = open spots, blue = my pending request."""
+    Green emoji = full team (4/4), yellow = open spots, blue = my pending request.
+    Matches in added_set are prefixed with ✅."""
     today = datetime.utcnow().date()
     end = today + timedelta(days=days_ahead)
 
@@ -1363,9 +1503,10 @@ def format_my_calendar(matches, pt_id, days_ahead=11):
             club = m.get("location", "?")
             mid = m.get("match_id", "")
             link = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
+            check = "✅" if added_set and mid in added_set else ""
             parts.append(
                 f"  {icon} <code>{time_str}</code> {cur}/{max_p} — "
-                f'<a href="{link}">{club}</a>'
+                f'<a href="{link}">{club}</a> {check}'
             )
 
     return "\n".join(parts)
@@ -1387,7 +1528,8 @@ async def _send_pdf_calendar(uid, chat_id, context, start_date, end_date, label_
         loc_label = ", ".join(locs)
     out_path = f"{DATA_DIR}/calendar_{uid}_{start_date}_{end_date}.pdf"
     try:
-        n = render_calendar_pdf(matches, pt_id, start_date, end_date, out_path, location_label=loc_label)
+        n = render_calendar_pdf(matches, pt_id, start_date, end_date, out_path,
+                                location_label=loc_label, added_set=get_added(uid))
     except Exception as e:
         log.exception("PDF render failed")
         await context.bot.send_message(chat_id, f"Ошибка создания PDF: {e}")
@@ -1441,9 +1583,9 @@ async def cmd_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not pt_id:
         await _need_link(update.message)
         return
-    await update.message.reply_text("🔄 Строю календарь...")
+    await update.message.reply_text("Строю календарь...")
     matches = playtomic_user_matches(pt_id)
-    text = format_my_calendar(matches, pt_id)
+    text = format_my_calendar(matches, pt_id, added_set=get_added(uid))
     for chunk in split_message(text):
         await update.message.reply_text(chunk, parse_mode="HTML", disable_web_page_preview=True)
 
@@ -1761,9 +1903,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not pt_id:
             await _need_link(q)
             return
-        await q.edit_message_text("🔄 Строю календарь...")
+        await q.edit_message_text("Строю календарь...")
         matches = playtomic_user_matches(pt_id)
-        text = format_my_calendar(matches, pt_id)
+        text = format_my_calendar(matches, pt_id, added_set=get_added(uid))
         chat_id = q.message.chat_id
         for chunk in split_message(text):
             await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
@@ -1775,12 +1917,183 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not pt_id:
             await _need_link(q)
             return
-        await q.edit_message_text("🔄 Загружаю расписание...")
+        await q.edit_message_text("Загружаю расписание...")
         matches = playtomic_user_matches(pt_id)
-        text = format_my_schedule(matches, pt_id)
         chat_id = q.message.chat_id
-        for chunk in split_message(text):
-            await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
+        # Группируем будущие матчи юзера
+        today = datetime.utcnow().date().isoformat()
+        upcoming = []
+        for m in matches:
+            if m.get("status") in ("CANCELED", "EXPIRED", "FINISHED"):
+                continue
+            if m.get("start_date", "")[:10] < today:
+                continue
+            join_info = m.get("join_requests_info") or {}
+            my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
+            in_team = any(p.get("user_id") == pt_id for t in m.get("teams", []) for p in t.get("players", []))
+            if in_team or my_req:
+                upcoming.append(m)
+        upcoming.sort(key=lambda x: x.get("start_date", ""))
+
+        if not upcoming:
+            await context.bot.send_message(chat_id, "Будущих матчей нет.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+            return
+
+        added = get_added(uid)
+        # Сверху — быстрый экспорт всего и диапазоны
+        await context.bot.send_message(chat_id,
+            f"<b>Расписание — {len(upcoming)} матчей</b>\n\nДобавь всё в календарь одним файлом или отметь отдельные игры ниже.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(".ics — всё", callback_data="ics_all")],
+                [InlineKeyboardButton("Неделя", callback_data="ics_w"),
+                 InlineKeyboardButton("2 недели", callback_data="ics_2w"),
+                 InlineKeyboardButton("Месяц", callback_data="ics_m")],
+            ]))
+        for m in upcoming:
+            dt = parse_dt(m.get("start_date"))
+            tz_str = (((m.get("location_info") or {}).get("address") or {}).get("timezone")
+                      or ((m.get("tenant") or {}).get("address") or {}).get("timezone") or "UTC")
+            try:
+                # Playtomic returns naive UTC — attach UTC then convert to venue local
+                local = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo(tz_str)) if dt else None
+                dt_str = local.strftime("%a %d.%m %H:%M") if local else "?"
+            except Exception:
+                dt_str = dt.strftime("%a %d.%m %H:%M") if dt else "?"
+            for en, ru in DAY_NAMES_RU.items():
+                dt_str = dt_str.replace(en, ru)
+            club = m.get("location", "?")
+            mid = m.get("match_id", "")
+            cur = sum(len(t.get("players", [])) for t in m.get("teams", []))
+            mx = sum(t.get("max_players", 0) for t in m.get("teams", []))
+            status = m.get("status", "")
+            join_info = m.get("join_requests_info") or {}
+            my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
+            label = "Подтверждён" if status == "CONFIRMED" else ("Заявка ожидает" if my_req and my_req.get("status") == "PENDING" else f"Игроков: {cur}/{mx}")
+            link_match = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
+            check = "✅ " if mid in added else ""
+            text = (f"{check}<b>{dt_str}</b> — {club}\n{label}")
+            buttons = []
+            gc = gcal_link(m)
+            gm = gmaps_link(m)
+            row1 = []
+            if gc: row1.append(InlineKeyboardButton("Google Calendar", url=gc))
+            row1.append(InlineKeyboardButton("Apple/Outlook (.ics)", callback_data=f"ics1_{mid}"))
+            buttons.append(row1)
+            row2 = [InlineKeyboardButton("Playtomic", url=link_match)]
+            if gm: row2.append(InlineKeyboardButton("Маршрут", url=gm))
+            buttons.append(row2)
+            mark_label = "✅ Добавлено — снять отметку" if mid in added else "Отметить как добавленное"
+            buttons.append([InlineKeyboardButton(mark_label, callback_data=f"mark_{mid}")])
+            await context.bot.send_message(chat_id, text, parse_mode="HTML",
+                disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(buttons))
+        return
+
+    # ── Toggle "added" mark ──
+    if data and data.startswith("mark_"):
+        match_id = data[5:]
+        new_state = toggle_added(uid, match_id)
+        # Обновим текст и кнопку этого сообщения
+        try:
+            old_text = q.message.text_html or q.message.text or ""
+            if new_state and not old_text.startswith("✅ "):
+                new_text = "✅ " + old_text
+            elif not new_state and old_text.startswith("✅ "):
+                new_text = old_text[2:]
+            else:
+                new_text = old_text
+            # Собираем новые кнопки на основе старых, подменив лейбл mark
+            new_kb = []
+            for row in (q.message.reply_markup.inline_keyboard if q.message.reply_markup else []):
+                new_row = []
+                for b in row:
+                    if b.callback_data == data:
+                        lbl = "✅ Добавлено — снять отметку" if new_state else "Отметить как добавленное"
+                        new_row.append(InlineKeyboardButton(lbl, callback_data=data))
+                    else:
+                        new_row.append(b)
+                new_kb.append(new_row)
+            await q.edit_message_text(new_text, parse_mode="HTML", disable_web_page_preview=True,
+                reply_markup=InlineKeyboardMarkup(new_kb))
+        except Exception as e:
+            log.warning("mark toggle redraw failed: %s", e)
+        return
+
+    # ── ICS export (single match) ──
+    if data and data.startswith("ics1_"):
+        match_id = data[5:]
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id:
+            await _need_link(q); return
+        chat_id = q.message.chat_id
+        await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
+        matches = playtomic_user_matches(pt_id)
+        m = next((x for x in matches if x.get("match_id") == match_id), None)
+        if not m:
+            await context.bot.send_message(chat_id, "Матч не найден.")
+            return
+        ics, n = build_ics([m], pt_id)
+        if n == 0:
+            await context.bot.send_message(chat_id, "Матч в прошедшем или вы не в составе.")
+            return
+        path = f"{DATA_DIR}/match_{match_id}.ics"
+        with open(path, "w") as f: f.write(ics)
+        with open(path, "rb") as f:
+            await context.bot.send_document(chat_id, document=f, filename=f"padel_match.ics",
+                caption="Открой файл — добавится в Apple/Google/Outlook календарь.")
+        try: os.remove(path)
+        except Exception: pass
+        # Автоматически помечаем как добавленный
+        mark_added(uid, match_id)
+        return
+
+    # ── ICS export (range) ──
+    if data in ("ics_all", "ics_w", "ics_2w", "ics_m"):
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id:
+            await _need_link(q); return
+        chat_id = q.message.chat_id
+        today = datetime.utcnow().date()
+        end_d = None
+        if data == "ics_w": end_d = today + timedelta(days=6)
+        elif data == "ics_2w": end_d = today + timedelta(days=13)
+        elif data == "ics_m":
+            from calendar import monthrange
+            end_d = today.replace(day=monthrange(today.year, today.month)[1])
+        await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
+        matches = playtomic_user_matches(pt_id)
+        ics, n = build_ics(matches, pt_id, start_d=today, end_d=end_d)
+        if n == 0:
+            await context.bot.send_message(chat_id, "Нет матчей в этом диапазоне.")
+            return
+        path = f"{DATA_DIR}/schedule_{uid}_{data}.ics"
+        with open(path, "w") as f: f.write(ics)
+        with open(path, "rb") as f:
+            await context.bot.send_document(chat_id, document=f, filename="padel_schedule.ics",
+                caption=f"{n} матчей. Открой в календаре — добавятся все события.")
+        try: os.remove(path)
+        except Exception: pass
+        # Помечаем все экспортированные как добавленные
+        u_now = get_user(uid)
+        added_set = set(u_now.get("calendar_added", []))
+        for m in matches:
+            mid_check = m.get("match_id")
+            sd = m.get("start_date", "")[:10]
+            if not mid_check or not sd: continue
+            if m.get("status") in ("CANCELED","EXPIRED","FINISHED"): continue
+            try:
+                d = datetime.strptime(sd, "%Y-%m-%d").date()
+            except Exception: continue
+            if d < today: continue
+            if end_d and d > end_d: continue
+            join_info = m.get("join_requests_info") or {}
+            my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
+            in_team = any(p.get("user_id") == pt_id for t in m.get("teams", []) for p in t.get("players", []))
+            if in_team or my_req:
+                added_set.add(mid_check)
+        u_now["calendar_added"] = list(added_set)
+        set_user(uid, u_now)
         return
 
     # ── Wizard start/restart (full reset) ──
