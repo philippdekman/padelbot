@@ -1081,8 +1081,8 @@ def format_my_schedule(matches, playtomic_user_id):
             mx = sum(t.get("max_players", 0) for t in m.get("teams", []))
             parts.append(f"\n  • <b>{dt_str}</b> — {club} ({cur}/{mx}) — <a href=\"{link}\">Открыть</a>")
 
-    render_section("✅ Подтверждённые", confirmed)
-    render_section("⏳ Ожидают подтверждения участников (полный состав)", open_full)
+    render_section("✅ Подтверждённые (оплачены)", confirmed)
+    render_section("🎯 Состав собран (ждём подтверждения/оплаты)", open_full)
     render_section("📝 Моя заявка на рассмотрении", pending_join)
     render_section("⚡ Открытые (ищут игроков)", open_partial)
 
