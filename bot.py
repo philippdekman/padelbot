@@ -1067,8 +1067,6 @@ def _main_menu_kb(u, context, uid):
             callback_data="my_watch_toggle"
         )],
     ]
-    if my_on:
-        rows.append([InlineKeyboardButton("Проверить мои матчи сейчас", callback_data="my_watch_now")])
     rows += [
         [InlineKeyboardButton("Статус и параметры", callback_data="show_status")],
         [InlineKeyboardButton("Сменить аккаунт Playtomic", callback_data="reset_id")],
@@ -1565,13 +1563,21 @@ async def _send_pdf_calendar(uid, chat_id, context, start_date, end_date, label_
             f"В диапазоне {start_date.strftime('%d.%m')}–{end_date.strftime('%d.%m')} нет матчей.")
         os.remove(out_path) if os.path.exists(out_path) else None
         return
-    caption = f"🗓 Календарь {start_date.strftime('%d.%m')}–{end_date.strftime('%d.%m.%Y')}\n{n} матчей{label_extra}"
+    caption = f"Календарь {start_date.strftime('%d.%m')}–{end_date.strftime('%d.%m.%Y')}\n{n} матчей{label_extra}"
     with open(out_path, "rb") as f:
         await context.bot.send_document(chat_id, document=f, filename=os.path.basename(out_path), caption=caption)
     try:
         os.remove(out_path)
     except Exception:
         pass
+    # Вслед за PDF — кнопка добавить всё в календарь
+    await context.bot.send_message(chat_id,
+        "Добавить эти матчи в календарь?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Добавить все матчи в Google/Apple/Outlook",
+                callback_data=f"icsr_{start_date.isoformat()}_{end_date.isoformat()}")],
+            [InlineKeyboardButton("← В меню", callback_data="back_main")],
+        ]))
 
 async def cmd_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send PDF calendar. Usage: /pdf  (next 14 days)  |  /pdf 2026-05-05 2026-05-15"""
@@ -1630,6 +1636,23 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(chunk, parse_mode="HTML", disable_web_page_preview=True)
 
 _PROFILE_RE = re.compile(r"playtomic\.io/profile/user/(\d+)")
+
+async def _render_pick_days(q, all_days, picked):
+    """Показывает список дней чекбоксами. all_days — отсортированный список ISO-дат; picked — set ISO-дат."""
+    rows = []
+    for d in all_days:
+        try:
+            dt = datetime.strptime(d, "%Y-%m-%d").date()
+            wd = DAY_NAMES_RU_SHORT.get(dt.weekday(), "?")
+            label = f"{wd} {dt.strftime('%d.%m')}"
+        except Exception:
+            label = d
+        mark = "✅ " if d in picked else ""
+        rows.append([InlineKeyboardButton(f"{mark}{label}", callback_data=f"pickday_{d}")])
+    rows.append([InlineKeyboardButton("Добавить выбранные в календарь", callback_data="ics_picked_send")])
+    rows.append([InlineKeyboardButton("← Назад", callback_data="my_schedule")])
+    txt = f"<b>Выбери дни для экспорта</b>\nВыбрано: {len(picked)}"
+    await q.edit_message_text(txt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
 
 NEED_LINK_TEXT = (
     "Пришли ссылку на свой профиль Playtomic. В приложении: "
@@ -2031,17 +2054,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
             label = "Подтверждён" if status == "CONFIRMED" else ("Заявка ожидает" if my_req and my_req.get("status") == "PENDING" else f"Игроков: {cur}/{mx}")
             link_match = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
+            gm = gmaps_link(m)
             check = "✅ " if mid in added else ""
-            text = (f"{check}<b>{dt_str}</b> — {club}\n{label}")
+            club_link = f'<a href="{gm}">{club}</a>' if gm else club
+            # Игроки с рейтингами
+            players_lines = []
+            for team in m.get("teams", []):
+                for p in team.get("players", []):
+                    pname = p.get("name") or p.get("full_name") or "?"
+                    plvl = p.get("level_value")
+                    lvl_str = f" · {plvl:.2f}" if plvl is not None else ""
+                    players_lines.append(f"  {pname}{lvl_str}")
+            players_block = ("\n\n" + "\n".join(players_lines)) if players_lines else ""
+            text = (
+                f"{check}<b>{dt_str}</b> — {club_link}\n"
+                f'{label} · <a href="{link_match}">Открыть в Playtomic</a>'
+                f"{players_block}"
+            )
             buttons = []
             gc = gcal_link(m)
-            gm = gmaps_link(m)
             if gc:
                 buttons.append([InlineKeyboardButton("Добавить в Google Calendar", url=gc)])
             buttons.append([InlineKeyboardButton("Добавить в Apple/Outlook календарь", callback_data=f"ics1_{mid}")])
-            row2 = [InlineKeyboardButton("Открыть Playtomic", url=link_match)]
-            if gm: row2.append(InlineKeyboardButton("Маршрут", url=gm))
-            buttons.append(row2)
+            chat_url = f"https://app.playtomic.io/matches/{mid}?product_type=open_match&chat=open"
+            buttons.append([InlineKeyboardButton("Чат матча", url=chat_url)])
             mark_label = "✅ Добавлено — снять отметку" if mid in added else "Отметить как добавленное"
             buttons.append([InlineKeyboardButton(mark_label, callback_data=f"mark_{mid}")])
             await context.bot.send_message(chat_id, text, parse_mode="HTML",
@@ -2107,29 +2143,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── ICS export (range) ──
-    if data in ("ics_all", "ics_w", "ics_2w", "ics_m"):
+    async def _send_ics_range(start_d, end_d):
         pt_id = u.get("playtomic_user_id")
         if not pt_id:
             await _need_link(q); return
         chat_id = q.message.chat_id
-        today = datetime.utcnow().date()
-        end_d = None
-        if data == "ics_w": end_d = today + timedelta(days=6)
-        elif data == "ics_2w": end_d = today + timedelta(days=13)
-        elif data == "ics_m":
-            from calendar import monthrange
-            end_d = today.replace(day=monthrange(today.year, today.month)[1])
         await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
         matches = playtomic_user_matches(pt_id)
-        ics, n = build_ics(matches, pt_id, start_d=today, end_d=end_d)
+        ics, n = build_ics(matches, pt_id, start_d=start_d, end_d=end_d)
         if n == 0:
             await context.bot.send_message(chat_id, "Нет матчей в этом диапазоне.")
             return
-        path = f"{DATA_DIR}/schedule_{uid}_{data}.ics"
+        path = f"{DATA_DIR}/schedule_{uid}_{start_d}_{end_d}.ics"
         with open(path, "w") as f: f.write(ics)
         with open(path, "rb") as f:
             await context.bot.send_document(chat_id, document=f, filename="padel_schedule.ics",
-                caption=f"{n} матчей. Открой в календаре — добавятся все события.")
+                caption=f"{n} матчей. Нажми на файл — добавятся в Google/Apple/Outlook календарь.")
         try: os.remove(path)
         except Exception: pass
         # Помечаем все экспортированные как добавленные
@@ -2143,7 +2172,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 d = datetime.strptime(sd, "%Y-%m-%d").date()
             except Exception: continue
-            if d < today: continue
+            if start_d and d < start_d: continue
             if end_d and d > end_d: continue
             join_info = m.get("join_requests_info") or {}
             my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
@@ -2151,6 +2180,118 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if in_team or my_req:
                 added_set.add(mid_check)
         u_now["calendar_added"] = list(added_set)
+        set_user(uid, u_now)
+
+    if data in ("ics_all", "ics_w", "ics_2w", "ics_m"):
+        today = datetime.utcnow().date()
+        end_d = None
+        if data == "ics_w": end_d = today + timedelta(days=6)
+        elif data == "ics_2w": end_d = today + timedelta(days=13)
+        elif data == "ics_m":
+            from calendar import monthrange
+            end_d = today.replace(day=monthrange(today.year, today.month)[1])
+        await _send_ics_range(today, end_d)
+        return
+
+    # ── ICS export by explicit range (icsr_<start>_<end>) ──
+    if data and data.startswith("icsr_"):
+        try:
+            _, s, e = data.split("_", 2)
+            start_d = datetime.strptime(s, "%Y-%m-%d").date()
+            end_d = datetime.strptime(e, "%Y-%m-%d").date()
+        except Exception:
+            return
+        await _send_ics_range(start_d, end_d)
+        return
+
+    # ── Выбор отдельных дней ──
+    if data == "ics_pickdays":
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id: await _need_link(q); return
+        today = datetime.utcnow().date().isoformat()
+        matches = playtomic_user_matches(pt_id)
+        days = set()
+        for m in matches:
+            if m.get("status") in ("CANCELED","EXPIRED","FINISHED"): continue
+            sd = m.get("start_date","")[:10]
+            if not sd or sd < today: continue
+            join_info = m.get("join_requests_info") or {}
+            my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
+            in_team = any(p.get("user_id") == pt_id for t in m.get("teams", []) for p in t.get("players", []))
+            if in_team or my_req:
+                days.add(sd)
+        if not days:
+            await q.edit_message_text("Нет будущих матчей.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+            return
+        u["ics_picked_days"] = []
+        set_user(uid, u)
+        await _render_pick_days(q, sorted(days), set())
+        return
+
+    if data and data.startswith("pickday_"):
+        d = data[len("pickday_"):]
+        u_now = get_user(uid)
+        picked = set(u_now.get("ics_picked_days", []))
+        if d in picked: picked.discard(d)
+        else: picked.add(d)
+        u_now["ics_picked_days"] = sorted(picked)
+        set_user(uid, u_now)
+        # перерисовываем
+        pt_id = u_now.get("playtomic_user_id")
+        today_iso = datetime.utcnow().date().isoformat()
+        matches = playtomic_user_matches(pt_id) if pt_id else []
+        all_days = set()
+        for m in matches:
+            if m.get("status") in ("CANCELED","EXPIRED","FINISHED"): continue
+            sd = m.get("start_date","")[:10]
+            if not sd or sd < today_iso: continue
+            join_info = m.get("join_requests_info") or {}
+            my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
+            in_team = any(p.get("user_id") == pt_id for t in m.get("teams", []) for p in t.get("players", []))
+            if in_team or my_req:
+                all_days.add(sd)
+        await _render_pick_days(q, sorted(all_days), picked)
+        return
+
+    if data == "ics_picked_send":
+        u_now = get_user(uid)
+        picked = u_now.get("ics_picked_days", [])
+        if not picked:
+            await q.answer("Ничего не выбрано", show_alert=True)
+            return
+        # Отдельный build_ics по списку дат
+        pt_id = u_now.get("playtomic_user_id")
+        if not pt_id: await _need_link(q); return
+        chat_id = q.message.chat_id
+        await context.bot.send_chat_action(chat_id=chat_id, action="upload_document")
+        matches = playtomic_user_matches(pt_id)
+        # фильтруем матчи по выбранным дням
+        picked_set = set(picked)
+        filtered = [m for m in matches if m.get("start_date", "")[:10] in picked_set]
+        ics, n = build_ics(filtered, pt_id)
+        if n == 0:
+            await context.bot.send_message(chat_id, "Нет матчей в выбранные дни.")
+            return
+        path = f"{DATA_DIR}/schedule_{uid}_picked.ics"
+        with open(path, "w") as f: f.write(ics)
+        with open(path, "rb") as f:
+            await context.bot.send_document(chat_id, document=f, filename="padel_schedule.ics",
+                caption=f"{n} матчей по выбранным дням. Нажми на файл — добавятся в календарь.")
+        try: os.remove(path)
+        except Exception: pass
+        # помечаем
+        added_set = set(u_now.get("calendar_added", []))
+        for m in filtered:
+            mid_check = m.get("match_id")
+            if not mid_check: continue
+            join_info = m.get("join_requests_info") or {}
+            my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
+            in_team = any(p.get("user_id") == pt_id for t in m.get("teams", []) for p in t.get("players", []))
+            if in_team or my_req:
+                added_set.add(mid_check)
+        u_now["calendar_added"] = list(added_set)
+        u_now["ics_picked_days"] = []
         set_user(uid, u_now)
         return
 
@@ -2462,6 +2603,7 @@ def _my_match_state(m, pt_id):
         "max_players": max_p,
         "is_full": len(players) >= max_p if max_p else False,
         "my_request_status": my_req.get("status") if my_req else None,
+        "start_date": (m.get("start_date") or "")[:10],
     }
 
 def _diff_my_matches(prev_states, current_matches, pt_id):
@@ -2537,12 +2679,20 @@ def _diff_my_matches(prev_states, current_matches, pt_id):
                 events.append(f"📝 Отправлена заявка: {label}")
 
     # ── Исчезнувшие матчи (удалены/отменены/я вышел) ──
+    # Сравниваем только с бывшими "будущими" матчами, иначе все прошедшие будут помечены как удалённые.
+    # Используем поле "start_date" из prev — его нет в старых снимках, поэтому берём из status: если был PENDING/CONFIRMED — был в будущем.
     for mid, prev in prev_states.items():
         if mid in current_by_id:
             continue
-        # Было состояние, сейчас матч не возвращается API.
+        prev_status = (prev or {}).get("status", "")
+        if prev_status in ("FINISHED", "EXPIRED", "CANCELED"):
+            continue
+        # Работаем только с будущими матчами. Если в старом snapshot нет start_date — пропускаем и ждём следующего тика.
+        prev_sd = (prev or {}).get("start_date")
+        if not prev_sd or prev_sd < today:
+            continue
         link = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
-        events.append(f"❌ Матч удалён или вы больше не в составе: <a href=\"{link}\">открыть</a>")
+        events.append(f"❌ Матч отменён или вы вышли: <a href=\"{link}\">открыть</a>")
 
     return events
 
