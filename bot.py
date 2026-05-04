@@ -1005,8 +1005,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("⚙️ Настроить мониторинг", callback_data="wiz_begin")],
-            [InlineKeyboardButton("📅 Моё расписание", callback_data="my_schedule")],
-            [InlineKeyboardButton("🔔 Мониторинг моего аккаунта", callback_data="my_watch_toggle")],
+            [InlineKeyboardButton("🗓 Календарь", callback_data="my_calendar"),
+             InlineKeyboardButton("📅 Расписание", callback_data="my_schedule")],
+            [InlineKeyboardButton("🔔 Мониторинг аккаунта", callback_data="my_watch_toggle")],
         ])
     )
 
@@ -1090,6 +1091,80 @@ def format_my_schedule(matches, playtomic_user_id):
         parts.append("\nНичего не запланировано.")
 
     return "".join(parts)
+
+def format_my_calendar(matches, pt_id, days_ahead=11):
+    """Visual calendar grid: days x time-of-day blocks.
+    Green emoji = full team (4/4), yellow = open spots, blue = my pending request."""
+    today = datetime.utcnow().date()
+    end = today + timedelta(days=days_ahead)
+
+    # Filter & group matches by date
+    by_date = {}
+    for m in matches:
+        sd = m.get("start_date", "")
+        if not sd:
+            continue
+        if m.get("status") in ("CANCELED", "EXPIRED", "FINISHED"):
+            continue
+        try:
+            dt = datetime.strptime(sd[:16], "%Y-%m-%dT%H:%M")
+        except ValueError:
+            continue
+        if dt.date() < today or dt.date() > end:
+            continue
+        by_date.setdefault(dt.date(), []).append((dt, m))
+
+    if not by_date:
+        return "На ближайшие дни ничего не запланировано."
+
+    parts = [f"<b>🗓 Календарь {today.strftime('%d.%m')} — {end.strftime('%d.%m')}</b>\n"]
+    parts.append("🟢 Состав собран · 🟡 Ищут игроков · 🔵 Моя заявка\n")
+
+    for d in sorted(by_date.keys()):
+        day_str = d.strftime("%d.%m")
+        wd = DAY_NAMES_RU_SHORT.get(d.weekday(), "?")
+        parts.append(f"\n<b>📅 {wd} {day_str}</b>")
+
+        for dt, m in sorted(by_date[d], key=lambda x: x[0]):
+            players = [p for team in m.get("teams", []) for p in team.get("players", [])]
+            max_p = sum(t.get("max_players", 0) for t in m.get("teams", []))
+            cur = len(players)
+            join_info = m.get("join_requests_info") or {}
+            my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
+
+            if my_req and my_req.get("status") == "PENDING":
+                icon = "🔵"
+            elif max_p > 0 and cur >= max_p:
+                icon = "🟢"
+            else:
+                icon = "🟡"
+
+            time_str = dt.strftime("%H:%M")
+            club = m.get("location", "?")
+            mid = m.get("match_id", "")
+            link = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
+            parts.append(
+                f"  {icon} <code>{time_str}</code> {cur}/{max_p} — "
+                f'<a href="{link}">{club}</a>'
+            )
+
+    return "\n".join(parts)
+
+async def cmd_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Visual calendar of upcoming matches."""
+    uid = update.effective_user.id
+    u = get_user(uid)
+    pt_id = u.get("playtomic_user_id")
+    if not pt_id:
+        await update.message.reply_text(
+            "Сначала сохрани Playtomic ID: <code>/setid 9436699</code>",
+            parse_mode="HTML")
+        return
+    await update.message.reply_text("🔄 Строю календарь...")
+    matches = playtomic_user_matches(pt_id)
+    text = format_my_calendar(matches, pt_id)
+    for chunk in split_message(text):
+        await update.message.reply_text(chunk, parse_mode="HTML", disable_web_page_preview=True)
 
 async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user's upcoming matches grouped by status."""
@@ -1204,6 +1279,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Одобрении/отклонении заявок\n\n"
             f"Отключить: /mywatch"
         )
+        return
+
+    # ── My calendar button ──
+    if data == "my_calendar":
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id:
+            await q.edit_message_text(
+                "Сначала сохрани Playtomic ID:\n<code>/setid 9436699</code>",
+                parse_mode="HTML")
+            return
+        await q.edit_message_text("🔄 Строю календарь...")
+        matches = playtomic_user_matches(pt_id)
+        text = format_my_calendar(matches, pt_id)
+        chat_id = q.message.chat_id
+        for chunk in split_message(text):
+            await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
         return
 
     # ── My schedule button ──
@@ -1729,6 +1820,7 @@ def main():
     app.add_handler(CommandHandler("schedule", cmd_schedule))
     app.add_handler(CommandHandler("setid", cmd_setid))
     app.add_handler(CommandHandler("mywatch", cmd_my_watch))
+    app.add_handler(CommandHandler("calendar", cmd_calendar))
     app.add_handler(CallbackQueryHandler(on_callback))
     log.info("Bot starting...")
     app.run_polling(drop_pending_updates=True)
