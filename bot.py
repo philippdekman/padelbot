@@ -283,6 +283,15 @@ def filter_matches(matches, cfg, loc_dates):
         if m.get("status") in ("CANCELED", "FINISHED", "CONFIRMED"):
             continue
 
+        # Skip private matches (link-only, not searchable on Playtomic).
+        # Public open matches have visibility=VISIBLE.
+        if m.get("visibility") and m.get("visibility") != "VISIBLE":
+            continue
+        # Skip court bookings — only show real open matches
+        mtype = m.get("match_type")
+        if mtype and mtype not in ("COMPETITIVE", "FRIENDLY"):
+            continue
+
         dt = parse_dt(m.get("start_date"))
         local_dt = _to_local(dt, loc_name) if dt else None
 
