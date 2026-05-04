@@ -1069,6 +1069,7 @@ def _main_menu_kb(u, context, uid):
     ]
     rows += [
         [InlineKeyboardButton("Статус и параметры", callback_data="show_status")],
+        [InlineKeyboardButton("Сбросить все отметки «добавлено»", callback_data="reset_added")],
         [InlineKeyboardButton("Сменить аккаунт Playtomic", callback_data="reset_id")],
     ]
     return InlineKeyboardMarkup(rows)
@@ -1535,7 +1536,7 @@ def format_my_calendar(matches, pt_id, days_ahead=11, added_set=None):
 
     return "\n".join(parts)
 
-async def _send_pdf_calendar(uid, chat_id, context, start_date, end_date, label_extra=""):
+async def _send_pdf_calendar(uid, chat_id, context, start_date, end_date, label_extra="", picked_days=None):
     """Build PDF and send to chat."""
     u = get_user(uid)
     pt_id = u.get("playtomic_user_id")
@@ -1551,6 +1552,9 @@ async def _send_pdf_calendar(uid, chat_id, context, start_date, end_date, label_
     if locs:
         loc_label = ", ".join(locs)
     out_path = f"{DATA_DIR}/calendar_{uid}_{start_date}_{end_date}.pdf"
+    if picked_days:
+        # фильтруем только матчи выбранных дней
+        matches = [m for m in matches if m.get("start_date", "")[:10] in picked_days]
     try:
         n = render_calendar_pdf(matches, pt_id, start_date, end_date, out_path,
                                 location_label=loc_label, added_set=get_added(uid))
@@ -1636,6 +1640,50 @@ async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(chunk, parse_mode="HTML", disable_web_page_preview=True)
 
 _PROFILE_RE = re.compile(r"playtomic\.io/profile/user/(\d+)")
+
+async def _render_pdf_range_start(q, days_ahead=21):
+    today = datetime.utcnow().date()
+    rows, row = [], []
+    for i in range(days_ahead):
+        d = today + timedelta(days=i)
+        row.append(InlineKeyboardButton(d.strftime("%d.%m"), callback_data=f"pdfrs_{d.isoformat()}"))
+        if len(row) == 5:
+            rows.append(row); row = []
+    if row: rows.append(row)
+    rows.append([InlineKeyboardButton("← Назад", callback_data="pdf_menu")])
+    await q.edit_message_text("<b>Дата начала:</b>", parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows))
+
+async def _render_pdf_range_end(q, start_d, max_span=30):
+    rows, row = [], []
+    for i in range(max_span + 1):
+        d = start_d + timedelta(days=i)
+        row.append(InlineKeyboardButton(d.strftime("%d.%m"),
+                   callback_data=f"pdfre_{start_d.isoformat()}_{d.isoformat()}"))
+        if len(row) == 5:
+            rows.append(row); row = []
+    if row: rows.append(row)
+    rows.append([InlineKeyboardButton("← Назад", callback_data="pdfrange_start")])
+    await q.edit_message_text(
+        f"<b>Начало: {start_d.strftime('%d.%m')}</b>\nВыбери дату окончания:",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+
+async def _render_pdf_pick_days(q, all_days, picked):
+    rows = []
+    for d in all_days:
+        try:
+            dt = datetime.strptime(d, "%Y-%m-%d").date()
+            wd = DAY_NAMES_RU_SHORT.get(dt.weekday(), "?")
+            label = f"{wd} {dt.strftime('%d.%m')}"
+        except Exception:
+            label = d
+        mark = "✅ " if d in picked else ""
+        rows.append([InlineKeyboardButton(f"{mark}{label}", callback_data=f"pdfday_{d}")])
+    rows.append([InlineKeyboardButton("Построить PDF по выбранным дням", callback_data="pdfdays_send")])
+    rows.append([InlineKeyboardButton("← Назад", callback_data="pdf_menu")])
+    await q.edit_message_text(
+        f"<b>Выбери дни для PDF</b>\nВыбрано: {len(picked)}",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
 
 async def _render_pick_days(q, all_days, picked):
     """Показывает список дней чекбоксами. all_days — отсортированный список ISO-дат; picked — set ISO-дат."""
@@ -1779,6 +1827,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
         return
 
+    # ── Reset все отметки «добавлено» ──
+    if data == "reset_added":
+        u["calendar_added"] = []
+        set_user(uid, u)
+        await q.edit_message_text(
+            "Отметки «добавлено в календарь» сброшены.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return
+
     # ── Reset Playtomic ID ──
     if data == "reset_id":
         u["playtomic_user_id"] = None
@@ -1869,52 +1926,107 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── PDF menu ──
     if data == "pdf_menu":
         await q.edit_message_text(
-            "<b>📄 PDF календарь</b>\n\n"
-            "Выбери диапазон:",
+            "<b>PDF календарь</b>\n\nВыбери диапазон:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📆 7 дней", callback_data="pdf_7"),
-                 InlineKeyboardButton("📆 14 дней", callback_data="pdf_14"),
-                 InlineKeyboardButton("📆 21 день", callback_data="pdf_21")],
-                [InlineKeyboardButton("🎯 Все даты с матчами", callback_data="pdf_all")],
-                [InlineKeyboardButton("✏️ Произвольный диапазон", callback_data="pdf_custom")],
+                [InlineKeyboardButton("7 дней", callback_data="pdf_7"),
+                 InlineKeyboardButton("14 дней", callback_data="pdf_14"),
+                 InlineKeyboardButton("21 день", callback_data="pdf_21")],
+                [InlineKeyboardButton("Все даты с матчами", callback_data="pdf_all")],
+                [InlineKeyboardButton("Выбрать диапазон вручную", callback_data="pdfrange_start")],
+                [InlineKeyboardButton("Выбрать отдельные дни", callback_data="pdfdays_pick")],
+                [InlineKeyboardButton("← В меню", callback_data="back_main")],
             ]))
         return
 
-    if data and data.startswith("pdfr_"):
-        # custom range from preset buttons
+    # ── PDF произвольный диапазон ──
+    if data == "pdfrange_start":
+        # Выбор даты НАЧАЛА: сетка 21 ближайших дней
+        await _render_pdf_range_start(q, days_ahead=21)
+        return
+
+    if data and data.startswith("pdfrs_"):
+        # User picked start date -> show end date grid
+        s = data[len("pdfrs_"):]
+        try:
+            start_d = datetime.strptime(s, "%Y-%m-%d").date()
+        except Exception:
+            return
+        await _render_pdf_range_end(q, start_d)
+        return
+
+    if data and data.startswith("pdfre_"):
+        # End date selected, generate PDF
         try:
             _, s, e = data.split("_", 2)
-            start_date = datetime.strptime(s, "%Y-%m-%d").date()
-            end_date = datetime.strptime(e, "%Y-%m-%d").date()
+            start_d = datetime.strptime(s, "%Y-%m-%d").date()
+            end_d = datetime.strptime(e, "%Y-%m-%d").date()
         except Exception:
             return
         chat_id = q.message.chat_id
-        await q.edit_message_text("Строю PDF...")
-        await _send_pdf_calendar(uid, chat_id, context, start_date, end_date)
+        await q.edit_message_text(f"Строю PDF {start_d.strftime('%d.%m')}–{end_d.strftime('%d.%m')}...")
+        await _send_pdf_calendar(uid, chat_id, context, start_d, end_d)
+        return
+
+    # ── PDF для выбранных дней ──
+    if data == "pdfdays_pick":
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id: await _need_link(q); return
+        today_iso = datetime.utcnow().date().isoformat()
+        matches = playtomic_user_matches(pt_id)
+        days = set()
+        for m in matches:
+            if m.get("status") in ("CANCELED","EXPIRED","FINISHED"): continue
+            sd = m.get("start_date","")[:10]
+            if sd and sd >= today_iso:
+                days.add(sd)
+        if not days:
+            await q.edit_message_text("Нет будущих матчей.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="pdf_menu")]]))
+            return
+        u["pdf_picked_days"] = []
+        set_user(uid, u)
+        await _render_pdf_pick_days(q, sorted(days), set())
+        return
+
+    if data and data.startswith("pdfday_"):
+        d = data[len("pdfday_"):]
+        u_now = get_user(uid)
+        picked = set(u_now.get("pdf_picked_days", []))
+        if d in picked: picked.discard(d)
+        else: picked.add(d)
+        u_now["pdf_picked_days"] = sorted(picked)
+        set_user(uid, u_now)
+        pt_id = u_now.get("playtomic_user_id")
+        today_iso = datetime.utcnow().date().isoformat()
+        matches = playtomic_user_matches(pt_id) if pt_id else []
+        all_days = set()
+        for m in matches:
+            if m.get("status") in ("CANCELED","EXPIRED","FINISHED"): continue
+            sd = m.get("start_date","")[:10]
+            if sd and sd >= today_iso: all_days.add(sd)
+        await _render_pdf_pick_days(q, sorted(all_days), picked)
+        return
+
+    if data == "pdfdays_send":
+        u_now = get_user(uid)
+        picked = u_now.get("pdf_picked_days", [])
+        if not picked:
+            await q.answer("Ничего не выбрано", show_alert=True); return
+        chat_id = q.message.chat_id
+        start_d = datetime.strptime(min(picked), "%Y-%m-%d").date()
+        end_d = datetime.strptime(max(picked), "%Y-%m-%d").date()
+        await q.edit_message_text(f"Строю PDF для выбранных дней ({len(picked)})...")
+        await _send_pdf_calendar(uid, chat_id, context, start_d, end_d,
+                                 picked_days=set(picked), label_extra=f" · выбрано {len(picked)} дней")
+        u_now["pdf_picked_days"] = []
+        set_user(uid, u_now)
         return
 
     if data and data.startswith("pdf_"):
         action = data[4:]
         chat_id = q.message.chat_id
         today = datetime.utcnow().date()
-        if action == "custom":
-            # Вместо ввода вручную — выбор пресетов кнопками
-            today = datetime.utcnow().date()
-            from calendar import monthrange
-            this_m_end = today.replace(day=monthrange(today.year, today.month)[1])
-            next_w_start = today + timedelta(days=(7 - today.weekday()) % 7 or 7)
-            next_w_end = next_w_start + timedelta(days=6)
-            await q.edit_message_text(
-                "<b>Выбери период:</b>",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"До конца месяца ({this_m_end.strftime('%d.%m')})", callback_data=f"pdfr_{today.isoformat()}_{this_m_end.isoformat()}")],
-                    [InlineKeyboardButton(f"Следующая неделя ({next_w_start.strftime('%d.%m')}–{next_w_end.strftime('%d.%m')})", callback_data=f"pdfr_{next_w_start.isoformat()}_{next_w_end.isoformat()}")],
-                    [InlineKeyboardButton("+30 дней", callback_data=f"pdfr_{today.isoformat()}_{(today + timedelta(days=29)).isoformat()}")],
-                    [InlineKeyboardButton("← Назад", callback_data="pdf_menu")],
-                ]))
-            return
         if action == "all":
             pt_id = u.get("playtomic_user_id")
             if not pt_id:
@@ -2053,8 +2165,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if gc:
                 buttons.append([InlineKeyboardButton("Добавить в Google Calendar", url=gc)])
             buttons.append([InlineKeyboardButton("Добавить в Apple/Outlook календарь", callback_data=f"ics1_{mid}")])
-            chat_url = f"https://app.playtomic.io/matches/{mid}?product_type=open_match&chat=open"
-            buttons.append([InlineKeyboardButton("Чат матча", url=chat_url)])
+            # Playtomic web не имеет deep-link на чат — он открывается внутри карточки матча
             mark_label = "✅ Добавлено — снять отметку" if mid in added else "Отметить как добавленное"
             buttons.append([InlineKeyboardButton(mark_label, callback_data=f"mark_{mid}")])
             await context.bot.send_message(chat_id, text, parse_mode="HTML",
@@ -2115,8 +2226,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption="Открой файл — добавится в Apple/Google/Outlook календарь.")
         try: os.remove(path)
         except Exception: pass
-        # Автоматически помечаем как добавленный
-        mark_added(uid, match_id)
         return
 
     # ── ICS export (range) ──
@@ -2138,26 +2247,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=f"{n} матчей. Нажми на файл — добавятся в Google/Apple/Outlook календарь.")
         try: os.remove(path)
         except Exception: pass
-        # Помечаем все экспортированные как добавленные
-        u_now = get_user(uid)
-        added_set = set(u_now.get("calendar_added", []))
-        for m in matches:
-            mid_check = m.get("match_id")
-            sd = m.get("start_date", "")[:10]
-            if not mid_check or not sd: continue
-            if m.get("status") in ("CANCELED","EXPIRED","FINISHED"): continue
-            try:
-                d = datetime.strptime(sd, "%Y-%m-%d").date()
-            except Exception: continue
-            if start_d and d < start_d: continue
-            if end_d and d > end_d: continue
-            join_info = m.get("join_requests_info") or {}
-            my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
-            in_team = any(p.get("user_id") == pt_id for t in m.get("teams", []) for p in t.get("players", []))
-            if in_team or my_req:
-                added_set.add(mid_check)
-        u_now["calendar_added"] = list(added_set)
-        set_user(uid, u_now)
+        # Не помечаем автоматически — пользователь сам отметит кнопкой «Отметить как добавленное».
 
     if data in ("ics_all", "ics_w", "ics_2w", "ics_m"):
         today = datetime.utcnow().date()
@@ -2257,17 +2347,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=f"{n} матчей по выбранным дням. Нажми на файл — добавятся в календарь.")
         try: os.remove(path)
         except Exception: pass
-        # помечаем
-        added_set = set(u_now.get("calendar_added", []))
-        for m in filtered:
-            mid_check = m.get("match_id")
-            if not mid_check: continue
-            join_info = m.get("join_requests_info") or {}
-            my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
-            in_team = any(p.get("user_id") == pt_id for t in m.get("teams", []) for p in t.get("players", []))
-            if in_team or my_req:
-                added_set.add(mid_check)
-        u_now["calendar_added"] = list(added_set)
         u_now["ics_picked_days"] = []
         set_user(uid, u_now)
         return
