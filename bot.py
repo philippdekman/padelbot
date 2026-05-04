@@ -1009,15 +1009,9 @@ async def show_step(source, uid, context):
 
 # ─── Handlers ───────────────────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Открыть меню. Никого не сбрасывает — настройки и мониторинг сохраняются."""
     uid = update.effective_user.id
-    # Stop any existing monitoring — prevents duplicate notifications
-    for job in context.job_queue.get_jobs_by_name(f"watch_{uid}"):
-        job.schedule_removal()
     u = get_user(uid)
-    u["wizard"] = None
-    u["seen_events"] = {}
-    u["monitoring_active"] = False
-    set_user(uid, u)
 
     pt_id = u.get("playtomic_user_id")
     if not pt_id:
@@ -1033,21 +1027,46 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
+        _main_menu_text(u, context, uid),
+        parse_mode="HTML",
+        reply_markup=_main_menu_kb(u, context, uid),
+        disable_web_page_preview=True
+    )
+
+def _main_menu_text(u, context, uid):
+    pt_id = u.get("playtomic_user_id", "—")
+    has_wizard = bool(u.get("wizard"))
+    search_on = bool(context.job_queue.get_jobs_by_name(f"watch_{uid}"))
+    my_on = bool(context.job_queue.get_jobs_by_name(f"my_watch_{uid}"))
+    return (
         "<b>Padel Monitor</b>\n\n"
         "Открытые матчи и турниры Playtomic под твой уровень, "
-        "уведомления о новых слотах, личное расписание и PDF-календарь.",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Настроить поиск игр", callback_data="wiz_begin")],
-            [InlineKeyboardButton("Моё расписание", callback_data="my_schedule"),
-             InlineKeyboardButton("Календарь", callback_data="my_calendar")],
-            [InlineKeyboardButton("PDF календарь", callback_data="pdf_menu")],
-            [InlineKeyboardButton("Уведомления об изменениях в моих матчах", callback_data="my_watch_toggle")],
-            [InlineKeyboardButton("Статус мониторинга", callback_data="show_status"),
-             InlineKeyboardButton("Остановить", callback_data="stop_monitoring")],
-            [InlineKeyboardButton("Сменить аккаунт Playtomic", callback_data="reset_id")],
-        ])
+        "уведомления о новых слотах, личное расписание и PDF-календарь.\n\n"
+        f"Playtomic: <code>{pt_id}</code>\n"
+        f"Поиск новых игр: {'включён' if search_on else ('настроен, но остановлен' if has_wizard else 'не настроен')}\n"
+        f"Мониторинг моих матчей: {'включён' if my_on else 'выключен'}"
     )
+
+def _main_menu_kb(u, context, uid):
+    has_wizard = bool(u.get("wizard"))
+    search_on = bool(context.job_queue.get_jobs_by_name(f"watch_{uid}"))
+    rows = []
+    if has_wizard and not search_on:
+        rows.append([InlineKeyboardButton("▶ Возобновить поиск игр", callback_data="resume_search")])
+    if has_wizard and search_on:
+        rows.append([InlineKeyboardButton("Перенастроить поиск", callback_data="wiz_begin"),
+                     InlineKeyboardButton("Остановить", callback_data="stop_monitoring")])
+    elif not has_wizard:
+        rows.append([InlineKeyboardButton("Настроить поиск игр", callback_data="wiz_begin")])
+    rows += [
+        [InlineKeyboardButton("Моё расписание", callback_data="my_schedule"),
+         InlineKeyboardButton("Календарь", callback_data="my_calendar")],
+        [InlineKeyboardButton("PDF календарь", callback_data="pdf_menu")],
+        [InlineKeyboardButton("Уведомления об изменениях в моих матчах", callback_data="my_watch_toggle")],
+        [InlineKeyboardButton("Статус и параметры", callback_data="show_status")],
+        [InlineKeyboardButton("Сменить аккаунт Playtomic", callback_data="reset_id")],
+    ]
+    return InlineKeyboardMarkup(rows)
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -1746,27 +1765,34 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "back_main":
         pt_id = u.get("playtomic_user_id")
         if not pt_id:
-            await q.edit_message_text(
-                "<b>Padel Monitor</b>\n\n"
-                "Пришли ссылку на свой профиль Playtomic. В приложении: "
-                "Профиль → Делиться → Telegram. Пример:\n"
-                "<code>https://app.playtomic.io/profile/user/9436699</code>",
-                parse_mode="HTML", disable_web_page_preview=True)
+            await q.edit_message_text(NEED_LINK_TEXT, parse_mode="HTML", disable_web_page_preview=True)
             return
+        await q.edit_message_text(_main_menu_text(u, context, uid),
+            parse_mode="HTML", disable_web_page_preview=True,
+            reply_markup=_main_menu_kb(u, context, uid))
+        return
+
+    # ── Resume search monitoring (without reset) ──
+    if data == "resume_search":
+        w = u.get("wizard")
+        if not w:
+            await q.edit_message_text("Настройки поиска не найдены. Нажми «Настроить поиск игр».",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+            return
+        chat_id = q.message.chat_id
+        u["monitoring_active"] = True
+        u["chat_id"] = chat_id
+        set_user(uid, u)
+        for job in context.job_queue.get_jobs_by_name(f"watch_{uid}"):
+            job.schedule_removal()
+        freq_sec = w.get("frequency", 60) * 60
+        context.job_queue.run_repeating(
+            watch_tick, interval=freq_sec, first=10,
+            name=f"watch_{uid}", data={"uid": uid, "chat_id": chat_id},
+        )
         await q.edit_message_text(
-            "<b>Padel Monitor</b>\n\n"
-            "Открытые матчи и турниры Playtomic под твой уровень, уведомления, расписание, PDF.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Настроить поиск игр", callback_data="wiz_begin")],
-                [InlineKeyboardButton("Моё расписание", callback_data="my_schedule"),
-                 InlineKeyboardButton("Календарь", callback_data="my_calendar")],
-                [InlineKeyboardButton("PDF календарь", callback_data="pdf_menu")],
-                [InlineKeyboardButton("Уведомления об изменениях в моих матчах", callback_data="my_watch_toggle")],
-                [InlineKeyboardButton("Статус мониторинга", callback_data="show_status"),
-                 InlineKeyboardButton("Остановить", callback_data="stop_monitoring")],
-                [InlineKeyboardButton("Сменить аккаунт Playtomic", callback_data="reset_id")],
-            ]))
+            f"Поиск возобновлён. Проверка каждые {w.get('frequency', 60)} мин.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
         return
 
     # ── My account watch toggle ──
@@ -2096,13 +2122,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_user(uid, u_now)
         return
 
-    # ── Wizard start/restart (full reset) ──
-    if data in ("wiz_begin", "wiz_restart"):
+    # ── Wizard start/restart ──
+    # wiz_begin: мягкий — если визард уже есть, режим редактирования, история сохраняется.
+    # wiz_restart: полный сброс (явный выбор «Перенастроить с нуля»).
+    if data == "wiz_restart":
         u["wizard"] = None
-        u["seen_events"] = {}  # full reset clears history
+        u["seen_events"] = {}
         set_user(uid, u)
         u = wiz(uid)
-        w = u["wizard"]
+        await show_step(q, uid, context)
+        return
+    if data == "wiz_begin":
+        if u.get("wizard"):
+            u["wizard"]["editing"] = True
+            u["wizard"]["step"] = "location"
+            set_user(uid, u)
+        else:
+            u = wiz(uid)
         await show_step(q, uid, context)
         return
 
