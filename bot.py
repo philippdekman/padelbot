@@ -1061,7 +1061,7 @@ def _main_menu_kb(u, context, uid):
     my_on = bool(context.job_queue.get_jobs_by_name(f"my_watch_{uid}"))
     rows += [
         [InlineKeyboardButton("Мои матчи — добавить в календарь, открыть маршрут", callback_data="my_schedule")],
-        [InlineKeyboardButton("PDF календарь на печать", callback_data="pdf_menu")],
+        [InlineKeyboardButton("PDF календарь", callback_data="pdf_menu")],
         [InlineKeyboardButton(
             "Уведомления о моих матчах: выключить" if my_on else "Уведомления о моих матчах: включить",
             callback_data="my_watch_toggle"
