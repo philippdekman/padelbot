@@ -1731,8 +1731,8 @@ async def _courts_render_menu(q, uid, context):
     rows.append([InlineKeyboardButton("Новый пресет / поиск", callback_data="courts_new")])
     rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
     msg = ("<b>Свободные корты</b>\n\n"
-           "Мониторят отмены/новые слоты в выбранных клубах. Проверка каждые 10 мин. "
-           "Авто-стоп когда все окна в прошлом.")
+           "Покажу все свободные слоты по фильтрам и буду следить за новыми — это и отмены, и вновь открывающиеся корты. "
+           "Проверка каждые 10 мин. Авто-стоп когда все окна в прошлом.")
     await q.edit_message_text(msg, parse_mode="HTML", disable_web_page_preview=True,
         reply_markup=InlineKeyboardMarkup(rows))
 
