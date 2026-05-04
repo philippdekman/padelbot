@@ -29,7 +29,14 @@ if not TOKEN:
     print("ERROR: TELEGRAM_BOT_TOKEN environment variable is not set!")
     print("Set it in Railway: Variables tab -> New Variable")
     exit(1)
-SETTINGS_FILE = "user_settings.json"
+# Use Railway Volume mount path if available, fallback to local
+DATA_DIR = os.environ.get("DATA_DIR", "/data" if os.path.isdir("/data") else ".")
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except Exception:
+    DATA_DIR = "."
+SETTINGS_FILE = os.path.join(DATA_DIR, "user_settings.json")
+log.info(f"Settings file: {SETTINGS_FILE}")
 
 # ─── Location presets ───────────────────────────────────────────────
 LOCATIONS = {
@@ -1430,6 +1437,7 @@ async def launch_monitoring(q, uid, context, w):
     for mc in matchi: seen[event_key(mc)] = True
     u["seen_events"] = seen
     u["monitoring_active"] = True
+    u["chat_id"] = chat_id  # store for restart recovery
     set_user(uid, u)
 
     for chunk in split_message(text):
@@ -1485,8 +1493,31 @@ async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
 
 # ─── Main ───────────────────────────────────────────────────────────
+async def post_init(application):
+    """Restore active monitoring jobs after restart."""
+    all_settings = load_all_settings()
+    restored = 0
+    for uid_str, cfg in all_settings.items():
+        if not cfg.get("monitoring_active"):
+            continue
+        w = cfg.get("wizard")
+        if not w:
+            continue
+        try:
+            uid = int(uid_str)
+        except ValueError:
+            continue
+        chat_id = cfg.get("chat_id", uid)
+        freq_sec = w.get("frequency", 60) * 60
+        application.job_queue.run_repeating(
+            watch_tick, interval=freq_sec, first=freq_sec,
+            name=f"watch_{uid}", data={"uid": uid, "chat_id": chat_id},
+        )
+        restored += 1
+    log.info(f"Restored {restored} monitoring job(s) after restart")
+
 def main():
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("status", cmd_status))
