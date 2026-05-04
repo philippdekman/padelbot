@@ -1802,30 +1802,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_main_menu_kb(u, context, uid))
         return
 
-    # ── Ручная проверка моих матчей ──
-    if data == "my_watch_now":
-        pt_id = u.get("playtomic_user_id")
-        if not pt_id:
-            await _need_link(q); return
-        chat_id = q.message.chat_id
-        await q.edit_message_text("Проверяю изменения...")
-        matches = playtomic_user_matches(pt_id)
-        prev_states = u.get("my_match_states", {})
-        new_states = {m["match_id"]: _my_match_state(m, pt_id) for m in matches if m.get("match_id")}
-        events = _diff_my_matches(prev_states, matches, pt_id)
-        u["my_match_states"] = new_states
-        u["chat_id"] = chat_id
-        set_user(uid, u)
-        if events:
-            text = "<b>Изменения в моих матчах:</b>\n\n" + "\n\n".join(events)
-            for chunk in split_message(text):
-                await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
-        else:
-            await context.bot.send_message(chat_id, "Ничего не изменилось.")
-        await context.bot.send_message(chat_id, "—",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
-        return
-
     # ── Resume search monitoring (without reset) ──
     if data == "resume_search":
         w = u.get("wizard")
@@ -2679,17 +2655,18 @@ def _diff_my_matches(prev_states, current_matches, pt_id):
                 events.append(f"📝 Отправлена заявка: {label}")
 
     # ── Исчезнувшие матчи (удалены/отменены/я вышел) ──
-    # Сравниваем только с бывшими "будущими" матчами, иначе все прошедшие будут помечены как удалённые.
-    # Используем поле "start_date" из prev — его нет в старых снимках, поэтому берём из status: если был PENDING/CONFIRMED — был в будущем.
+    # Пропускаем, если в старом snapshot нет start_date — это снимок старой структуры, без этого поля.
     for mid, prev in prev_states.items():
         if mid in current_by_id:
             continue
-        prev_status = (prev or {}).get("status", "")
-        if prev_status in ("FINISHED", "EXPIRED", "CANCELED"):
+        if not isinstance(prev, dict):
             continue
-        # Работаем только с будущими матчами. Если в старом snapshot нет start_date — пропускаем и ждём следующего тика.
-        prev_sd = (prev or {}).get("start_date")
-        if not prev_sd or prev_sd < today:
+        prev_sd = prev.get("start_date")
+        if not prev_sd:
+            continue  # старый snapshot — не спамим
+        if prev_sd < today:
+            continue
+        if prev.get("status") in ("FINISHED", "EXPIRED", "CANCELED"):
             continue
         link = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
         events.append(f"❌ Матч отменён или вы вышли: <a href=\"{link}\">открыть</a>")
