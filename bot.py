@@ -1890,7 +1890,7 @@ async def _courts_handle(q, uid, context, data):
         draft["loc_name"] = loc_name
         draft["step"] = "clubs"
         loc = LOCATIONS[loc_name]
-        clubs = playtomic_clubs(loc["lat"], loc["lon"], 30000)
+        clubs = playtomic_clubs(loc["lat"], loc["lon"], 50000)
         # Считаем расстояние от центра (haversine, км)
         import math
         def dist_km(lat1, lon1, lat2, lon2):
@@ -1900,9 +1900,15 @@ async def _courts_handle(q, uid, context, data):
             a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
             return 2 * R * math.asin(math.sqrt(a))
         avail = []
+        skip_keywords = ("test", "tobe removed", "to be removed", "тест")
         for c in clubs:
             tid = c.get("tenant_id")
             if not tid: continue
+            name = c.get("tenant_name") or c.get("name", "?")
+            # Фильтруем тестовые и удалённые клубы
+            name_l = name.lower()
+            if any(kw in name_l for kw in skip_keywords):
+                continue
             addr = (c.get("address") or {})
             coord = addr.get("coordinate") or {}
             try:
@@ -1911,12 +1917,12 @@ async def _courts_handle(q, uid, context, data):
                 d_km = None
             avail.append({
                 "id": tid,
-                "name": c.get("tenant_name") or c.get("name", "?"),
+                "name": name,
                 "distance_km": round(d_km, 1) if d_km is not None else None,
             })
-        # Сортируем по расстоянию и берём ближайшие 25
+        # Сортируем по расстоянию и берём ближайшие 35
         avail.sort(key=lambda x: x["distance_km"] if x["distance_km"] is not None else 9999)
-        draft["clubs_avail"] = avail[:25]
+        draft["clubs_avail"] = avail[:35]
         u["court_draft"] = draft
         set_user(uid, u)
         await _courts_render_clubs(q, uid)
