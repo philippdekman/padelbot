@@ -3460,6 +3460,12 @@ async def post_init(application):
                 name=f"my_watch_{uid}", data={"uid": uid, "chat_id": chat_id},
             )
             my_restored += 1
+        # Free courts monitoring
+        if cfg.get("court_watch"):
+            application.job_queue.run_repeating(
+                watch_courts, interval=600, first=30,
+                name=f"courts_{uid}", data={"uid": uid, "chat_id": chat_id},
+            )
     log.info(f"Restored {restored} search job(s), {my_restored} my-account job(s)")
 
 def main():
