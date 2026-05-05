@@ -3262,47 +3262,55 @@ def _my_match_state(m, pt_id):
     }
 
 def _diff_my_matches(prev_states, current_matches, pt_id):
-    """Compare previous snapshot vs current. Returns list of human-readable change events."""
+    """Compare previous snapshot vs current. Returns list of (text, match_or_None) tuples.
+    text — готовый HTML-блок, match — объект матча для кнопок (None — без кнопок)."""
     events = []
     today = datetime.utcnow().date().isoformat()
     current_by_id = {m["match_id"]: m for m in current_matches
                      if m.get("start_date", "")[:10] >= today
                      and m.get("status") not in ("FINISHED",)}
 
-    for mid, m in current_by_id.items():
-        cur = _my_match_state(m, pt_id)
-        prev = prev_states.get(mid)
-
-        # Format match label
+    def _fmt_label(m):
+        mid = m.get("match_id", "")
         dt = parse_dt(m.get("start_date"))
-        when = dt.strftime("%a %d.%m %H:%M") if dt else "?"
+        tz_str = (((m.get("location_info") or {}).get("address") or {}).get("timezone")
+                  or ((m.get("tenant") or {}).get("address") or {}).get("timezone") or "UTC")
+        try:
+            local = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo(tz_str)) if dt else None
+            when = local.strftime("%a %d.%m %H:%M") if local else "?"
+        except Exception:
+            when = dt.strftime("%a %d.%m %H:%M") if dt else "?"
         for en, ru in DAY_NAMES_RU.items():
             when = when.replace(en, ru)
         club = m.get("location", "?")
-        link = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
-        label = f'<b>{when}</b> — {club} <a href="{link}">»</a>'
+        return f"<b>{when}</b> — {club}"
+
+    for mid, m in current_by_id.items():
+        cur = _my_match_state(m, pt_id)
+        prev = prev_states.get(mid)
+        label = _fmt_label(m)
 
         if prev is None:
             # New match this user is involved in
             if pt_id in cur["player_ids"] or cur["my_request_status"]:
                 if cur["my_request_status"] == "PENDING":
-                    events.append(f"📝 Новая заявка: {label}")
+                    events.append((f"📝 <b>Новая заявка</b>\n{label}", m))
                 elif cur["my_request_status"] == "APPROVED":
-                    events.append(f"✅ Заявка одобрена: {label}")
+                    events.append((f"✅ <b>Заявка одобрена</b>\n{label}", m))
                 else:
-                    events.append(f"➕ Добавлен в матч: {label}")
+                    events.append((f"➕ <b>Добавлен в матч</b>\n{label}", m))
             continue
 
         # Status changed
         if cur["status"] != prev["status"]:
             if cur["status"] == "CONFIRMED":
-                events.append(f"✅ Матч ПОДТВЕРЖДЁН: {label}")
+                events.append((f"✅ <b>Матч подтверждён</b>\n{label}", m))
             elif cur["status"] == "CANCELED":
-                events.append(f"❌ Матч ОТМЕНЁН: {label}")
+                events.append((f"❌ <b>Матч отменён</b>\n{label}", m))
             elif cur["status"] == "EXPIRED":
-                events.append(f"⚠️ Матч истёк: {label}")
+                events.append((f"⚠️ <b>Матч истёк</b>\n{label}", m))
             else:
-                events.append(f"🔄 Статус изменён ({prev['status']} → {cur['status']}): {label}")
+                events.append((f"🔄 <b>Статус изменён</b> ({prev['status']} → {cur['status']})\n{label}", m))
 
         # Players composition changed
         joined = set(cur["player_ids"]) - set(prev["player_ids"])
@@ -3314,24 +3322,24 @@ def _diff_my_matches(prev_states, current_matches, pt_id):
                     n = (p.get("full_name") or p.get("name") or "?")
                     lvl = p.get("level_value")
                     jnames.append(f'{n}{f" ({lvl:.1f})" if lvl is not None else ""}')
-            events.append(f"➕ Игрок вошёл ({', '.join(jnames)}): {label}")
+            events.append((f"➕ <b>Игрок вошёл</b>\n{', '.join(jnames)}\n{label}", m))
         if left:
-            events.append(f"➖ Игрок вышел: {label}")
+            events.append((f"➖ <b>Игрок вышел</b>\n{label}", m))
 
         # Full / no longer full
         if cur["is_full"] and not prev["is_full"]:
-            events.append(f"🎯 Состав ПОЛНЫЙ ({cur['player_count']}/{cur['max_players']}): {label}")
+            events.append((f"🎯 <b>Состав полный</b> ({cur['player_count']}/{cur['max_players']})\n{label}", m))
         elif not cur["is_full"] and prev["is_full"]:
-            events.append(f"🟡 Освободилось место ({cur['player_count']}/{cur['max_players']}): {label}")
+            events.append((f"🟡 <b>Освободилось место</b> ({cur['player_count']}/{cur['max_players']})\n{label}", m))
 
         # Join request status change
         if cur["my_request_status"] != prev["my_request_status"]:
             if cur["my_request_status"] == "APPROVED":
-                events.append(f"✅ Твоя заявка ОДОБРЕНА: {label}")
+                events.append((f"✅ <b>Твоя заявка одобрена</b>\n{label}", m))
             elif cur["my_request_status"] == "REJECTED":
-                events.append(f"❌ Твоя заявка ОТКЛОНЕНА: {label}")
+                events.append((f"❌ <b>Твоя заявка отклонена</b>\n{label}", m))
             elif cur["my_request_status"] == "PENDING":
-                events.append(f"📝 Отправлена заявка: {label}")
+                events.append((f"📝 <b>Отправлена заявка</b>\n{label}", m))
 
     # ── Исчезнувшие матчи (удалены/отменены/я вышел) ──
     # Пропускаем, если в старом snapshot нет start_date — это снимок старой структуры, без этого поля.
@@ -3348,7 +3356,7 @@ def _diff_my_matches(prev_states, current_matches, pt_id):
         if prev.get("status") in ("FINISHED", "EXPIRED", "CANCELED"):
             continue
         link = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
-        events.append(f"❌ Матч отменён или вы вышли: <a href=\"{link}\">открыть</a>")
+        events.append((f'❌ <b>Матч отменён или вы вышли</b>\n<a href="{link}">открыть</a>', None))
 
     return events
 
@@ -3371,9 +3379,24 @@ async def watch_my_account(context: ContextTypes.DEFAULT_TYPE):
     u["my_match_states"] = new_states
     set_user(uid, u)
     if events:
-        text = "<b>📅 Изменения в моём расписании:</b>\n\n" + "\n\n".join(events)
-        for chunk in split_message(text):
-            await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
+        await context.bot.send_message(chat_id, "<b>Изменения в моём расписании:</b>", parse_mode="HTML")
+        for text, m in events:
+            kb = None
+            if m and m.get("match_id"):
+                mid = m["match_id"]
+                buttons = []
+                gc = gcal_link(m)
+                gm = gmaps_link(m)
+                if gc:
+                    buttons.append([InlineKeyboardButton("Добавить в Google Calendar", url=gc)])
+                buttons.append([InlineKeyboardButton("Добавить в Apple/Outlook календарь", callback_data=f"ics1_{mid}")])
+                row = [InlineKeyboardButton("Открыть Playtomic",
+                    url=f"https://app.playtomic.io/matches/{mid}?product_type=open_match")]
+                if gm: row.append(InlineKeyboardButton("Маршрут", url=gm))
+                buttons.append(row)
+                kb = InlineKeyboardMarkup(buttons)
+            await context.bot.send_message(chat_id, text, parse_mode="HTML",
+                disable_web_page_preview=True, reply_markup=kb)
 
 async def cmd_my_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle monitoring of user's own matches."""
