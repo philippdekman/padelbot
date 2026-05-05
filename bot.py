@@ -2905,7 +2905,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Разовый поиск ──
     if data == "oneoff_begin":
         u_now = get_user(uid)
-        # Сохраняем оригинальный wizard, подменяем на временный
         u_now["_wizard_backup"] = u_now.get("wizard")
         u_now["oneoff_active"] = True
         u_now["wizard"] = {
@@ -2913,7 +2912,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "locations": [],
             "radius_km": 50,
             "loc_dates": {},
-            "min_players_match": 1,
+            "min_players_match": 0,  # показываем все открытые матчи, даже пустые
             "min_players_tourn": 0,
             "level_min": None,
             "level_max": None,
@@ -3166,11 +3165,29 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Confirm & Launch ──
     if data == "wiz_go":
         if w and w.get("oneoff"):
-            # Разовый поиск: выполняем do_search, восстанавливаем backup wizard
             chat_id = q.message.chat_id
             await q.edit_message_text("Ищу по вашим фильтрам...", parse_mode="HTML")
             matches, tournaments, matchi = do_search(w)
+            log.info("oneoff result: %d matches, %d tournaments, %d matchi; locations=%s, loc_dates=%s, level=%s-%s, time=%s-%s",
+                     len(matches), len(tournaments), len(matchi), w.get("locations"), w.get("loc_dates"),
+                     w.get("level_min"), w.get("level_max"), w.get("time_from"), w.get("time_to"))
             text = format_results(matches, tournaments, matchi, "Результаты разового поиска")
+            if not (matches or tournaments or matchi):
+                # Покажем фильтры чтобы юзер понял почему
+                ld = w.get("loc_dates", {})
+                date_summary = "любые"
+                if ld:
+                    date_summary = ", ".join(f"{loc}: {d.get('from','?')}—{d.get('to','?')}" for loc, d in ld.items())
+                lvl = "любой" if w.get("level_min") is None else f"{w.get('level_min')}–{w.get('level_max')}"
+                tm = "любое"
+                if w.get("time_from") or w.get("time_to"):
+                    tm = f"{w.get('time_from','·')}–{w.get('time_to','·')}"
+                text = ("Ничего не найдено по фильтрам:\n\n"
+                        f"Локации: {', '.join(w.get('locations', [])) or '—'}\n"
+                        f"Даты: {date_summary}\n"
+                        f"Уровень: {lvl}\n"
+                        f"Время начала: {tm}\n\n"
+                        "Попробуй расширить диапазон или уровень.")
             for chunk in split_message(text):
                 await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
             # Восстанавливаем оригинальные настройки мониторинга
