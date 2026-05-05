@@ -541,7 +541,17 @@ def fmt_match(m):
     lmin, lmax = match_level_range(m)
     lvl = f" | Ур. {lmin:.1f}–{lmax:.1f}" if lmin is not None else ""
 
-    line = f"🏸 <b>{dt_str}</b> — {club}{lvl}\n"
+    sd_raw = m.get("start_date"); ed_raw = m.get("end_date")
+    dur_str = ""
+    try:
+        if sd_raw and ed_raw:
+            s_dt = datetime.strptime(sd_raw[:19], "%Y-%m-%dT%H:%M:%S")
+            e_dt = datetime.strptime(ed_raw[:19], "%Y-%m-%dT%H:%M:%S")
+            dm = int((e_dt - s_dt).total_seconds() // 60)
+            if dm: dur_str = f" · {dm} мин"
+    except Exception: pass
+
+    line = f"🏸 <b>{dt_str}</b>{dur_str} — {club}{lvl}\n"
     line += f"   👥 {players}/{max_p}"
     if link:
         line += f' | <a href="{link}">Playtomic</a>'
@@ -2657,10 +2667,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mid = m.get("match_id", "")
             cur = sum(len(t.get("players", [])) for t in m.get("teams", []))
             mx = sum(t.get("max_players", 0) for t in m.get("teams", []))
+            # Длительность матча
+            sd_raw = m.get("start_date"); ed_raw = m.get("end_date")
+            duration_min = None
+            try:
+                if sd_raw and ed_raw:
+                    s_dt = datetime.strptime(sd_raw[:19], "%Y-%m-%dT%H:%M:%S")
+                    e_dt = datetime.strptime(ed_raw[:19], "%Y-%m-%dT%H:%M:%S")
+                    duration_min = int((e_dt - s_dt).total_seconds() // 60)
+            except Exception:
+                pass
+            dur_str = f" · {duration_min} мин" if duration_min else ""
             status = m.get("status", "")
             join_info = m.get("join_requests_info") or {}
             my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
-            label = "Подтверждён" if status == "CONFIRMED" else ("Заявка ожидает" if my_req and my_req.get("status") == "PENDING" else f"Игроков: {cur}/{mx}")
+            label_base = "Подтверждён" if status == "CONFIRMED" else ("Заявка ожидает" if my_req and my_req.get("status") == "PENDING" else f"Игроков: {cur}/{mx}")
+            label = label_base + dur_str
             link_match = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
             gm = gmaps_link(m)
             check = "✅ " if mid in added else ""
@@ -3302,7 +3324,17 @@ def _diff_my_matches(prev_states, current_matches, pt_id):
         for en, ru in DAY_NAMES_RU.items():
             when = when.replace(en, ru)
         club = m.get("location", "?")
-        return f"<b>{when}</b> — {club}"
+        # Длительность
+        sd_raw = m.get("start_date"); ed_raw = m.get("end_date")
+        dur_str = ""
+        try:
+            if sd_raw and ed_raw:
+                s_dt = datetime.strptime(sd_raw[:19], "%Y-%m-%dT%H:%M:%S")
+                e_dt = datetime.strptime(ed_raw[:19], "%Y-%m-%dT%H:%M:%S")
+                dm = int((e_dt - s_dt).total_seconds() // 60)
+                if dm: dur_str = f" · {dm} мин"
+        except Exception: pass
+        return f"<b>{when}</b>{dur_str} — {club}"
 
     for mid, m in current_by_id.items():
         cur = _my_match_state(m, pt_id)
@@ -3563,7 +3595,16 @@ async def _send_match_card(context, chat_id, m):
     club = m.get("location", "?")
     cur = sum(len(t.get("players", [])) for t in m.get("teams", []))
     mx = sum(t.get("max_players", 0) for t in m.get("teams", []))
-    text = f"<b>{when}</b> — {club}\nИгроков: {cur}/{mx}"
+    sd_raw = m.get("start_date"); ed_raw = m.get("end_date")
+    duration_min = None
+    try:
+        if sd_raw and ed_raw:
+            s_dt = datetime.strptime(sd_raw[:19], "%Y-%m-%dT%H:%M:%S")
+            e_dt = datetime.strptime(ed_raw[:19], "%Y-%m-%dT%H:%M:%S")
+            duration_min = int((e_dt - s_dt).total_seconds() // 60)
+    except Exception: pass
+    dur_str = f" · {duration_min} мин" if duration_min else ""
+    text = f"<b>{when}</b>{dur_str} — {club}\nИгроков: {cur}/{mx}"
     buttons = [
         [InlineKeyboardButton("Открыть Playtomic",
             url=f"https://app.playtomic.io/matches/{mid}?product_type=open_match")],
