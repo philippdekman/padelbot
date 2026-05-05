@@ -1022,7 +1022,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pt_id = u.get("playtomic_user_id")
     if not pt_id:
         await update.message.reply_text(
-            "<b>Padel Monitor</b>\n\n"
+            "<b>Padel Monitoring</b>\n\n"
             "Это бот для игроков Playtomic. Он ищет открытые матчи и турниры под твой уровень, "
             "присылает уведомления, показывает твоё расписание, календарь и PDF.\n\n"
             "Чтобы начать, пришли ссылку на свой профиль Playtomic. В приложении: "
@@ -1045,7 +1045,7 @@ def _main_menu_text(u, context, uid):
     search_on = bool(context.job_queue.get_jobs_by_name(f"watch_{uid}"))
     my_on = bool(context.job_queue.get_jobs_by_name(f"my_watch_{uid}"))
     return (
-        "<b>Padel Monitor</b>\n\n"
+        "<b>Padel Monitoring</b>\n\n"
         "Открытые матчи и турниры Playtomic под твой уровень, "
         "уведомления о новых слотах, личное расписание и PDF-календарь.\n\n"
         f"Playtomic: <code>{pt_id}</code>\n"
