@@ -375,10 +375,10 @@ def filter_matches(matches, cfg, loc_dates):
         if match_players(m) < min_pl:
             continue
 
-        # Hide full matches
+        # Hide full matches (отключается флажком _keep_full для детекта «освободилось»)
         cur = match_players(m)
         max_p = match_max_players(m)
-        if max_p > 0 and cur >= max_p:
+        if max_p > 0 and cur >= max_p and not cfg.get("_keep_full"):
             continue
 
         result.append(m)
@@ -3276,6 +3276,8 @@ def _my_match_state(m, pt_id):
         "is_full": len(players) >= max_p if max_p else False,
         "my_request_status": my_req.get("status") if my_req else None,
         "start_date": (m.get("start_date") or "")[:10],
+        "player_names": {p.get("user_id"): (p.get("full_name") or p.get("name") or "?")
+                         for p in players if p.get("user_id")},
     }
 
 def _diff_my_matches(prev_states, current_matches, pt_id):
@@ -3329,25 +3331,36 @@ def _diff_my_matches(prev_states, current_matches, pt_id):
             else:
                 events.append((f"🔄 <b>Статус изменён</b> ({prev['status']} → {cur['status']})\n{label}", m))
 
-        # Players composition changed
+        # Players composition changed — join/leave + slots
         joined = set(cur["player_ids"]) - set(prev["player_ids"])
         left = set(prev["player_ids"]) - set(cur["player_ids"])
-        if joined:
-            jnames = []
-            for p in [p for team in m.get("teams", []) for p in team.get("players", [])]:
-                if p.get("user_id") in joined:
-                    n = (p.get("full_name") or p.get("name") or "?")
-                    lvl = p.get("level_value")
-                    jnames.append(f'{n}{f" ({lvl:.1f})" if lvl is not None else ""}')
-            events.append((f"➕ <b>Игрок вошёл</b>\n{', '.join(jnames)}\n{label}", m))
-        if left:
-            events.append((f"➖ <b>Игрок вышел</b>\n{label}", m))
+        # Имена вошедших — берём из текущего match
+        cur_players = {p.get("user_id"): p for team in m.get("teams", []) for p in team.get("players", [])}
+        # Имена вышедших — из prev (сохраняются в snapshot)
+        prev_players_map = (prev or {}).get("player_names", {}) or {}
 
-        # Full / no longer full
-        if cur["is_full"] and not prev["is_full"]:
+        def _name_with_lvl(p):
+            n = (p.get("full_name") or p.get("name") or "?")
+            lvl = p.get("level_value")
+            return f'{n}{f" ({lvl:.1f})" if lvl is not None else ""}'
+
+        if joined:
+            jnames = [_name_with_lvl(cur_players[uid_j]) for uid_j in joined if uid_j in cur_players]
+            count_str = f" — игроков {cur['player_count']}/{cur['max_players']}"
+            events.append((f"➕ <b>Игрок вошёл</b>\n{', '.join(jnames)}{count_str}\n{label}", m))
+        if left:
+            lnames = [prev_players_map.get(uid_l, "?") for uid_l in left]
+            count_str = f" — игроков {cur['player_count']}/{cur['max_players']}"
+            events.append((f"➖ <b>Игрок вышел</b>\n{', '.join(lnames)}{count_str}\n{label}", m))
+
+        # Full only — «Освободилось» уже имплицитно в сообщении «Игрок вышел»
+        if cur["is_full"] and not prev["is_full"] and not joined and not left:
             events.append((f"🎯 <b>Состав полный</b> ({cur['player_count']}/{cur['max_players']})\n{label}", m))
-        elif not cur["is_full"] and prev["is_full"]:
-            events.append((f"🟡 <b>Освободилось место</b> ({cur['player_count']}/{cur['max_players']})\n{label}", m))
+        elif cur["is_full"] and not prev["is_full"] and joined:
+            # Джоин довёл до полного — добавим пометку к последнему событию
+            if events and events[-1][1] is m:
+                old_text, _ = events[-1]
+                events[-1] = (old_text + "\nСостав стал полным.", m)
 
         # Join request status change
         if cur["my_request_status"] != prev["my_request_status"]:
@@ -3463,7 +3476,6 @@ async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
     uid = context.job.data["uid"]
     chat_id = context.job.data["chat_id"]
     u = get_user(uid)
-    # Check stop flag — if stopped, cancel this job and exit
     if not u.get("monitoring_active", False):
         context.job.schedule_removal()
         return
@@ -3473,23 +3485,89 @@ async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
 
     matches, tournaments, matchi = do_search(w)
     seen = u.get("seen_events", {})
+    # Снимок «были полные» — для детекта «освободилось место»
+    full_seen = set(u.get("seen_full_matches", []))
 
     new_m = [m for m in matches if event_key(m) not in seen]
     new_t = [t for t in tournaments if event_key(t) not in seen]
     new_mc = [mc for mc in matchi if event_key(mc) not in seen]
 
-    if not new_m and not new_t and not new_mc:
+    # Детект «освободилось место» — матчи подходящие по фильтрам, бывшие полными и ставшие неполными.
+    # Для этого отдельно вызовём do_search без фильтра по «полным» — в текущем filter полные отфильтровываются.
+    # Проще: из всех raw matches обратим внимание на те которые отфильтровались только из-за фулл.
+    matches_all_unfiltered, _t_unused, _mc_unused = do_search_unfiltered(w)
+    cur_full_ids = set()
+    freed_matches = []
+    for m in matches_all_unfiltered:
+        mid = m.get("match_id")
+        if not mid: continue
+        cur_count = sum(len(t.get("players", [])) for t in m.get("teams", []))
+        max_p = sum(t.get("max_players", 0) for t in m.get("teams", []))
+        if not max_p: continue
+        if cur_count >= max_p:
+            cur_full_ids.add(mid)
+        elif mid in full_seen:
+            # Был полным, стал неполным — освободилось
+            freed_matches.append(m)
+
+    if not new_m and not new_t and not new_mc and not freed_matches:
+        # Обновим full_seen в любом случае
+        u["seen_full_matches"] = list(cur_full_ids)
+        set_user(uid, u)
         return
 
     for m in new_m: seen[event_key(m)] = True
     for t in new_t: seen[event_key(t)] = True
     for mc in new_mc: seen[event_key(mc)] = True
     u["seen_events"] = seen
+    u["seen_full_matches"] = list(cur_full_ids)
     set_user(uid, u)
 
-    text = format_results(new_m, new_t, new_mc, "🆕 Новые события")
-    for chunk in split_message(text):
-        await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
+    if new_m or new_t or new_mc:
+        text = format_results(new_m, new_t, new_mc, "🆕 Новые события")
+        for chunk in split_message(text):
+            await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
+
+    if freed_matches:
+        await context.bot.send_message(chat_id, "<b>Освободилось место</b>", parse_mode="HTML")
+        for m in freed_matches:
+            await _send_match_card(context, chat_id, m)
+
+
+async def _send_match_card(context, chat_id, m):
+    """Отправляет одну карточку матча с кнопками (Playtomic, Maps)."""
+    mid = m.get("match_id", "")
+    dt = parse_dt(m.get("start_date"))
+    tz_str = (((m.get("location_info") or {}).get("address") or {}).get("timezone")
+              or ((m.get("tenant") or {}).get("address") or {}).get("timezone") or "UTC")
+    try:
+        local = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo(tz_str)) if dt else None
+        when = local.strftime("%a %d.%m %H:%M") if local else "?"
+    except Exception:
+        when = dt.strftime("%a %d.%m %H:%M") if dt else "?"
+    for en, ru in DAY_NAMES_RU.items():
+        when = when.replace(en, ru)
+    club = m.get("location", "?")
+    cur = sum(len(t.get("players", [])) for t in m.get("teams", []))
+    mx = sum(t.get("max_players", 0) for t in m.get("teams", []))
+    text = f"<b>{when}</b> — {club}\nИгроков: {cur}/{mx}"
+    buttons = [
+        [InlineKeyboardButton("Открыть Playtomic",
+            url=f"https://app.playtomic.io/matches/{mid}?product_type=open_match")],
+    ]
+    gm = gmaps_link(m)
+    if gm:
+        buttons[0].append(InlineKeyboardButton("Маршрут", url=gm))
+    await context.bot.send_message(chat_id, text, parse_mode="HTML",
+        disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+def do_search_unfiltered(w):
+    """Как do_search, но пропускает полные матчи в вывод (нужно для детекта 'freed').
+    Чтобы не дублировать логику, временно отключим фильтр 'hide_full' через копию визарда."""
+    w2 = dict(w)
+    w2["_keep_full"] = True  # флажок для filter_matches
+    return do_search(w2)
 
 # ─── Main ───────────────────────────────────────────────────────────
 async def post_init(application):
