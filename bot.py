@@ -3485,10 +3485,22 @@ async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
 
     matches, tournaments, matchi = do_search(w)
     seen = u.get("seen_events", {})
-    # Снимок «были полные» — для детекта «освободилось место»
     full_seen = set(u.get("seen_full_matches", []))
+    pt_id = u.get("playtomic_user_id")
 
-    new_m = [m for m in matches if event_key(m) not in seen]
+    def _user_already_in(m):
+        if not pt_id: return False
+        for team in m.get("teams", []):
+            for p in team.get("players", []):
+                if p.get("user_id") == pt_id:
+                    return True
+        join_info = m.get("join_requests_info") or {}
+        for r in join_info.get("requests", []):
+            if r.get("user_id") == pt_id:
+                return True
+        return False
+
+    new_m = [m for m in matches if event_key(m) not in seen and not _user_already_in(m)]
     new_t = [t for t in tournaments if event_key(t) not in seen]
     new_mc = [mc for mc in matchi if event_key(mc) not in seen]
 
@@ -3501,13 +3513,14 @@ async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
     for m in matches_all_unfiltered:
         mid = m.get("match_id")
         if not mid: continue
+        if _user_already_in(m):
+            continue
         cur_count = sum(len(t.get("players", [])) for t in m.get("teams", []))
         max_p = sum(t.get("max_players", 0) for t in m.get("teams", []))
         if not max_p: continue
         if cur_count >= max_p:
             cur_full_ids.add(mid)
         elif mid in full_seen:
-            # Был полным, стал неполным — освободилось
             freed_matches.append(m)
 
     if not new_m and not new_t and not new_mc and not freed_matches:
