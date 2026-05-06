@@ -126,9 +126,10 @@ def playtomic_clubs(lat, lon, radius_m=50000):
     url = f"{BASE}/tenants?sport_id=PADEL&coordinate={lat},{lon}&radius={radius_m}&size=50"
     return api_get(url) or []
 
-def playtomic_matches_by_tenants(tenant_ids: list, date_from=None, max_pages=8):
-    """Get matches for given tenant IDs. Smart pagination: only fetches more pages
-    for clubs where page 0 doesn't cover the target date range."""
+def playtomic_matches_by_tenants(tenant_ids: list, date_from=None, max_pages=30):
+    """Get matches for given tenant IDs. Smart pagination: API возвращает матчи
+    отсортированные по дате старта DESC, поэтому свежие идут в конце.
+    Дорабатываем до страниц где oldest_on_page < date_from."""
     if not tenant_ids:
         return []
     target_start = date_from or "2026-04-01"
@@ -140,12 +141,11 @@ def playtomic_matches_by_tenants(tenant_ids: list, date_from=None, max_pages=8):
             if not isinstance(data, list) or not data:
                 break
             all_matches.extend(data)
-            # API returns desc by date. Stop if oldest match on this page
-            # is before our target date range.
+            # API возвращает desc by start_date. Останавливаемся, когда самая ранняя
+            # дата на странице становится раньше целевой (уже вышли в прошлое).
             oldest = min(m.get("start_date", "9999")[:10] for m in data)
-            if oldest <= target_start:
+            if oldest < target_start:
                 break
-            # Also stop if we got fewer than 100 (last page)
             if len(data) < 100:
                 break
     return all_matches
