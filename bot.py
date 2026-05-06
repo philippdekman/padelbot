@@ -12,7 +12,7 @@ Features:
 """
 
 import os, json, logging, asyncio, re
-import courts
+import courts, rating
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import urllib.request, urllib.error
@@ -1084,6 +1084,7 @@ def _main_menu_kb(u, context, uid):
     rows += [
         [InlineKeyboardButton("Мои матчи — добавить в календарь, открыть маршрут", callback_data="my_schedule")],
         [InlineKeyboardButton("PDF календарь", callback_data="pdf_menu")],
+        [InlineKeyboardButton("Мой рейтинг и динамика", callback_data="rating_menu")],
         [InlineKeyboardButton(
             "Уведомления о моих матчах: выключить" if my_on else "Уведомления о моих матчах: включить",
             callback_data="my_watch_toggle"
@@ -2197,6 +2198,37 @@ async def _courts_render_window(q, uid):
         reply_markup=InlineKeyboardMarkup(rows))
 
 
+async def watch_rating(context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет рейтинг юзера. При изменении присылает уведомление."""
+    uid = context.job.data["uid"]
+    chat_id = context.job.data["chat_id"]
+    u = get_user(uid)
+    pt_id = u.get("playtomic_user_id")
+    if not pt_id or not u.get("rating_watch_active"):
+        context.job.schedule_removal(); return
+    matches = rating.fetch_user_matches(pt_id)
+    hist = rating.history_from_matches(matches, pt_id)
+    cur = rating.current_level(hist)
+    if cur is None:
+        return
+    prev = u.get("last_known_level")
+    u["last_known_level"] = cur
+    set_user(uid, u)
+    if prev is not None and abs(cur - prev) > 0.001:
+        delta = cur - prev
+        sign = "+" if delta > 0 else ""
+        emoji = "📈" if delta > 0 else "📉"
+        text = (f"{emoji} <b>Рейтинг изменён</b>\n"
+                f"Был: {prev:.2f}  →  Стал: <b>{cur:.2f}</b>  ({sign}{delta:.2f})")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Открыть профиль",
+                url=f"https://app.playtomic.io/profile/user/{pt_id}")],
+            [InlineKeyboardButton("PDF график", callback_data="rating_pdf")],
+        ])
+        await context.bot.send_message(chat_id, text, parse_mode="HTML",
+            disable_web_page_preview=True, reply_markup=kb)
+
+
 async def watch_courts(context: ContextTypes.DEFAULT_TYPE):
     """Periodic check of free court slots. Auto-stops when preset expired."""
     uid = context.job.data["uid"]
@@ -2913,6 +2945,131 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_user(uid, u_now)
         await q.edit_message_text("Отменено. Настройки мониторинга сохранены.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return
+
+    # ─── Рейтинг ───
+    if data == "rating_menu":
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id: await _need_link(q); return
+        watching = bool(context.job_queue.get_jobs_by_name(f"rating_{uid}"))
+        last_lvl = u.get("last_known_level")
+        rows = [
+            [InlineKeyboardButton("Показать текущий рейтинг", callback_data="rating_show")],
+            [InlineKeyboardButton("PDF график динамики", callback_data="rating_pdf")],
+            [InlineKeyboardButton(
+                "Авто-уведомления об изменениях: выключить" if watching
+                else "Авто-уведомления об изменениях: включить",
+                callback_data="rating_toggle"
+            )],
+            [InlineKeyboardButton("← В меню", callback_data="back_main")],
+        ]
+        last_str = f"Последнее известное: {last_lvl:.2f}" if last_lvl else ""
+        await q.edit_message_text(
+            "<b>Рейтинг Playtomic</b>\n\n"
+            f"Проверяю каждые 3 часа. При изменении придёт уведомление со ссылкой на твой профиль.\n"
+            f"{last_str}",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data == "rating_show":
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id: await _need_link(q); return
+        await q.edit_message_text("Загружаю...")
+        matches = rating.fetch_user_matches(pt_id)
+        hist = rating.history_from_matches(matches, pt_id)
+        cur = rating.current_level(hist)
+        if cur is None:
+            await q.edit_message_text("Рейтинг не найден.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="rating_menu")]]))
+            return
+        first = hist[0][1] if hist else cur
+        delta = cur - first
+        delta_str = f"{'+' if delta >= 0 else ''}{delta:.2f}"
+        period = f"{hist[0][0]} — {hist[-1][0]}" if hist else ""
+        max_lv = max(lv for _, lv in hist)
+        min_lv = min(lv for _, lv in hist)
+        text = (f"<b>Рейтинг Playtomic</b>\n\n"
+                f"Текущий: <b>{cur:.2f}</b>\n"
+                f"Изменение за период: {delta_str}\n"
+                f"Максимум: {max_lv:.2f}  ·  Минимум: {min_lv:.2f}\n"
+                f"Период наблюдения: {period}\n"
+                f"Точек: {len(hist)}")
+        u["last_known_level"] = cur
+        set_user(uid, u)
+        await q.edit_message_text(text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("PDF график", callback_data="rating_pdf")],
+                [InlineKeyboardButton("Открыть профиль",
+                    url=f"https://app.playtomic.io/profile/user/{pt_id}")],
+                [InlineKeyboardButton("← Назад", callback_data="rating_menu")],
+            ]))
+        return
+
+    if data == "rating_pdf":
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id: await _need_link(q); return
+        chat_id = q.message.chat_id
+        await q.edit_message_text("Строю график...")
+        matches = rating.fetch_user_matches(pt_id)
+        hist = rating.history_from_matches(matches, pt_id)
+        if not hist:
+            await context.bot.send_message(chat_id, "Нет данных.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="rating_menu")]]))
+            return
+        # Имя — из последнего матча
+        my_name = "Player"
+        for m in matches:
+            for team in m.get("teams", []):
+                for p in team.get("players", []):
+                    if p.get("user_id") == pt_id and p.get("name"):
+                        my_name = p["name"]; break
+        path = f"{DATA_DIR}/rating_{uid}.pdf"
+        try:
+            n = rating.render_rating_pdf(hist, pt_id, path, name=my_name)
+        except Exception as e:
+            log.exception("rating PDF failed")
+            await context.bot.send_message(chat_id, f"Ошибка генерации: {e}")
+            return
+        with open(path, "rb") as f:
+            await context.bot.send_document(chat_id, document=f, filename="rating.pdf",
+                caption=f"Рейтинг {my_name} · {n} точек")
+        try: os.remove(path)
+        except Exception: pass
+        await context.bot.send_message(chat_id, "—",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="rating_menu")]]))
+        return
+
+    if data == "rating_toggle":
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id: await _need_link(q); return
+        chat_id = q.message.chat_id
+        running = bool(context.job_queue.get_jobs_by_name(f"rating_{uid}"))
+        if running:
+            for j in context.job_queue.get_jobs_by_name(f"rating_{uid}"):
+                j.schedule_removal()
+            u["rating_watch_active"] = False
+            set_user(uid, u)
+            await q.edit_message_text("Авто-уведомления об изменении рейтинга выключены.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="rating_menu")]]))
+        else:
+            # Сразу инициализируем базовый уровень
+            matches = rating.fetch_user_matches(pt_id)
+            hist = rating.history_from_matches(matches, pt_id)
+            cur = rating.current_level(hist)
+            u["last_known_level"] = cur
+            u["rating_watch_active"] = True
+            u["chat_id"] = chat_id
+            set_user(uid, u)
+            context.job_queue.run_repeating(
+                watch_rating, interval=10800, first=10800,
+                name=f"rating_{uid}",
+                data={"uid": uid, "chat_id": chat_id},
+            )
+            cur_str = f"{cur:.2f}" if cur is not None else "неизвестно"
+            await q.edit_message_text(
+                f"Авто-уведомления включены. Текущий рейтинг: <b>{cur_str}</b>. Проверка каждые 3 часа.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="rating_menu")]]))
         return
 
     # ─── Свободные корты ───
@@ -3667,6 +3824,12 @@ async def post_init(application):
             application.job_queue.run_repeating(
                 watch_courts, interval=600, first=30,
                 name=f"courts_{uid}", data={"uid": uid, "chat_id": chat_id},
+            )
+        # Rating watch
+        if cfg.get("rating_watch_active") and cfg.get("playtomic_user_id"):
+            application.job_queue.run_repeating(
+                watch_rating, interval=10800, first=60,
+                name=f"rating_{uid}", data={"uid": uid, "chat_id": chat_id},
             )
     log.info(f"Restored {restored} search job(s), {my_restored} my-account job(s)")
 
