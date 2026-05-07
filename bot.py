@@ -126,28 +126,35 @@ def playtomic_clubs(lat, lon, radius_m=50000):
     url = f"{BASE}/tenants?sport_id=PADEL&coordinate={lat},{lon}&radius={radius_m}&size=50"
     return api_get(url) or []
 
-def playtomic_matches_by_tenants(tenant_ids: list, date_from=None, max_pages=30):
-    """Get matches for given tenant IDs. Smart pagination: API возвращает матчи
-    отсортированные по дате старта DESC, поэтому свежие идут в конце.
-    Дорабатываем до страниц где oldest_on_page < date_from."""
+def playtomic_matches_by_tenants(tenant_ids: list, date_from=None, max_pages=20):
+    """Get matches for given tenant IDs. Параллельные запросы по клубам.
+    API возвращает матчи DESC по дате старта. Проходим до страниц где
+    oldest_on_page < target_start."""
     if not tenant_ids:
         return []
+    import concurrent.futures
     target_start = date_from or "2026-04-01"
-    all_matches = []
-    for tid in tenant_ids:
+
+    def _fetch_for_tenant(tid):
+        out = []
         for page in range(max_pages):
             url = f"{BASE}/matches?sport_id=PADEL&tenant_id={tid}&page={page}&size=100"
             data = api_get(url)
             if not isinstance(data, list) or not data:
                 break
-            all_matches.extend(data)
-            # API возвращает desc by start_date. Останавливаемся, когда самая ранняя
-            # дата на странице становится раньше целевой (уже вышли в прошлое).
+            out.extend(data)
             oldest = min(m.get("start_date", "9999")[:10] for m in data)
             if oldest < target_start:
                 break
             if len(data) < 100:
                 break
+        return out
+
+    all_matches = []
+    # Параллельно до 8 клубов одновременно
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        for matches in ex.map(_fetch_for_tenant, tenant_ids):
+            all_matches.extend(matches)
     return all_matches
 
 def playtomic_tournaments(lat, lon, radius_m=50000):
