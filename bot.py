@@ -2198,10 +2198,38 @@ async def _courts_render_window(q, uid):
         reply_markup=InlineKeyboardMarkup(rows))
 
 
+# ─── Quiet hours ───
+QUIET_START_HOUR = 23
+QUIET_END_HOUR = 7
+
+def _user_local_now(uid: int):
+    u = get_user(uid)
+    w = u.get("wizard") or {}
+    locs = w.get("locations") or []
+    tz_str = "UTC"
+    if locs:
+        loc_name = locs[0]
+        tz_str = LOCATIONS.get(loc_name, {}).get("tz", "UTC")
+    elif u.get("court_watch"):
+        tz_str = LOCATIONS.get(u["court_watch"].get("loc_name", ""), {}).get("tz", "UTC")
+    return datetime.now(ZoneInfo(tz_str)), tz_str
+
+def _is_quiet(uid: int) -> bool:
+    if not get_user(uid).get("quiet_hours_enabled", True):
+        return False
+    now_local, _ = _user_local_now(uid)
+    h = now_local.hour
+    if QUIET_START_HOUR > QUIET_END_HOUR:
+        return h >= QUIET_START_HOUR or h < QUIET_END_HOUR
+    return QUIET_START_HOUR <= h < QUIET_END_HOUR
+
+
 async def watch_rating(context: ContextTypes.DEFAULT_TYPE):
     """Проверяет рейтинг юзера. При изменении присылает уведомление."""
     uid = context.job.data["uid"]
     chat_id = context.job.data["chat_id"]
+    if _is_quiet(uid):
+        return
     u = get_user(uid)
     pt_id = u.get("playtomic_user_id")
     if not pt_id or not u.get("rating_watch_active"):
@@ -2233,6 +2261,8 @@ async def watch_courts(context: ContextTypes.DEFAULT_TYPE):
     """Periodic check of free court slots. Auto-stops when preset expired."""
     uid = context.job.data["uid"]
     chat_id = context.job.data["chat_id"]
+    if _is_quiet(uid):
+        return
     u = get_user(uid)
     watch = u.get("court_watch")
     if not watch:
@@ -2311,11 +2341,28 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     pt_id = parse_playtomic_id(text)
     if not pt_id or "playtomic.io/profile/user/" not in text:
-        return  # оставляем визарду/другим обработчикам разобраться с обычным текстом
+        return
     uid = update.effective_user.id
+    chat_id = update.effective_chat.id
     u = get_user(uid)
     u["playtomic_user_id"] = pt_id
+    # Авто-включаем мониторинг рейтинга (проверка каждые 3 часа)
+    try:
+        matches = rating.fetch_user_matches(pt_id)
+        hist = rating.history_from_matches(matches, pt_id)
+        u["last_known_level"] = rating.current_level(hist)
+    except Exception:
+        pass
+    u["rating_watch_active"] = True
+    u["chat_id"] = chat_id
     set_user(uid, u)
+    for j in context.job_queue.get_jobs_by_name(f"rating_{uid}"):
+        j.schedule_removal()
+    context.job_queue.run_repeating(
+        watch_rating, interval=10800, first=10800,
+        name=f"rating_{uid}",
+        data={"uid": uid, "chat_id": chat_id},
+    )
     await update.message.reply_text(
         f"Playtomic ID сохранён: <code>{pt_id}</code>\n\nАккаунт привязан. Открой меню кнопкой «Menu» внизу.",
         parse_mode="HTML",
@@ -3560,29 +3607,16 @@ def _diff_my_matches(prev_states, current_matches, pt_id):
             elif cur["my_request_status"] == "PENDING":
                 events.append((f"📝 <b>Отправлена заявка</b>\n{label}", m))
 
-    # ── Исчезнувшие матчи (удалены/отменены/я вышел) ──
-    # Пропускаем, если в старом snapshot нет start_date — это снимок старой структуры, без этого поля.
-    for mid, prev in prev_states.items():
-        if mid in current_by_id:
-            continue
-        if not isinstance(prev, dict):
-            continue
-        prev_sd = prev.get("start_date")
-        if not prev_sd:
-            continue  # старый snapshot — не спамим
-        if prev_sd < today:
-            continue
-        if prev.get("status") in ("FINISHED", "EXPIRED", "CANCELED"):
-            continue
-        link = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
-        events.append((f'❌ <b>Матч отменён или вы вышли</b>\n<a href="{link}">открыть</a>', None))
-
+    # Не следим за «исчезнувшими» матчами — слишком ненадёжный сигнал
+    # (API прячет прошедшие матчи и реальные отмены приходят через status=CANCELED).
     return events
 
 async def watch_my_account(context: ContextTypes.DEFAULT_TYPE):
     """Monitor changes in user's own Playtomic matches."""
     uid = context.job.data["uid"]
     chat_id = context.job.data["chat_id"]
+    if _is_quiet(uid):
+        return
     u = get_user(uid)
     if not u.get("my_account_active"):
         context.job.schedule_removal()
@@ -3664,6 +3698,8 @@ async def cmd_my_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
     uid = context.job.data["uid"]
     chat_id = context.job.data["chat_id"]
+    if _is_quiet(uid):
+        return
     u = get_user(uid)
     if not u.get("monitoring_active", False):
         context.job.schedule_removal()
