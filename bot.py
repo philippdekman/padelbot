@@ -3512,6 +3512,12 @@ def _my_match_state(m, pt_id):
     max_p = sum(t.get("max_players", 0) for t in m.get("teams", []))
     join_info = m.get("join_requests_info") or {}
     my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
+    # Снимок счёта (сигнатура результатов)
+    score_sig = ""
+    for s in m.get("results", []) or []:
+        scores = s.get("scores") or []
+        if scores:
+            score_sig += f"{s.get('name','?')}:{','.join(str(x) for x in scores)};"
     return {
         "status": m.get("status"),
         "player_ids": sorted([p.get("user_id") for p in players]),
@@ -3522,6 +3528,7 @@ def _my_match_state(m, pt_id):
         "start_date": (m.get("start_date") or "")[:10],
         "player_names": {p.get("user_id"): (p.get("full_name") or p.get("name") or "?")
                          for p in players if p.get("user_id")},
+        "score_sig": score_sig,
     }
 
 def _diff_my_matches(prev_states, current_matches, pt_id):
@@ -3529,9 +3536,10 @@ def _diff_my_matches(prev_states, current_matches, pt_id):
     text — готовый HTML-блок, match — объект матча для кнопок (None — без кнопок)."""
     events = []
     today = datetime.utcnow().date().isoformat()
+    # Берём все матчи юзера — включая недавние прошедшие (для отслеживания публикации счёта)
+    week_ago = (datetime.utcnow() - timedelta(days=7)).date().isoformat()
     current_by_id = {m["match_id"]: m for m in current_matches
-                     if m.get("start_date", "")[:10] >= today
-                     and m.get("status") not in ("FINISHED",)}
+                     if m.get("start_date", "")[:10] >= week_ago}
 
     def _fmt_label(m):
         mid = m.get("match_id", "")
@@ -3577,6 +3585,23 @@ def _diff_my_matches(prev_states, current_matches, pt_id):
         # Статус — выводим только реальные отмены. Истечение/подтверждение — шум.
         if cur["status"] != prev["status"] and cur["status"] == "CANCELED":
             events.append((f"❌ <b>Матч отменён</b>\n{label}", m))
+
+        # Счёт опубликован впервые (сигнатура была пустая → появилась) или изменилась
+        if cur.get("score_sig") and cur.get("score_sig") != prev.get("score_sig"):
+            score_lines = []
+            for s in m.get("results", []) or []:
+                scores = s.get("scores") or []
+                if scores:
+                    pretty = " – ".join(str(x) for x in scores)
+                    score_lines.append(f"  {s.get('name','?')}: <b>{pretty}</b>")
+            score_block = ("\n" + "\n".join(score_lines)) if score_lines else ""
+            mid = m.get("match_id", "")
+            link = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
+            events.append((
+                f'🏆 <b>Опубликован счёт матча</b>\n{label}{score_block}\n'
+                f'<a href="{link}">Посмотреть матч</a>',
+                m
+            ))
 
         # Players composition changed — join/leave + slots
         joined = set(cur["player_ids"]) - set(prev["player_ids"])
