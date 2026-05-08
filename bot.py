@@ -12,7 +12,7 @@ Features:
 """
 
 import os, json, logging, asyncio, re
-import courts, rating
+import courts, rating, score_watcher
 from score_image import render_score_image
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -2522,6 +2522,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_user(uid, u)
             for job in context.job_queue.get_jobs_by_name(f"my_watch_{uid}"):
                 job.schedule_removal()
+            for job in context.job_queue.get_jobs_by_name(f"score_watch_{uid}"):
+                job.schedule_removal()
             await q.edit_message_text("⏹ Мониторинг моего аккаунта остановлен.")
             return
         matches_my = playtomic_user_matches(pt_id)
@@ -2534,9 +2536,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_user(uid, u)
         for job in context.job_queue.get_jobs_by_name(f"my_watch_{uid}"):
             job.schedule_removal()
+        for job in context.job_queue.get_jobs_by_name(f"score_watch_{uid}"):
+            job.schedule_removal()
         context.job_queue.run_repeating(
             watch_my_account, interval=180, first=15,
             name=f"my_watch_{uid}",
+            data={"uid": uid, "chat_id": q.message.chat_id},
+        )
+        # Score watcher — отдельный сервис, тик 10 мин
+        context.job_queue.run_repeating(
+            score_watcher.watch_scores,
+            interval=score_watcher.JOB_INTERVAL_SEC, first=30,
+            name=f"score_watch_{uid}",
             data={"uid": uid, "chat_id": q.message.chat_id},
         )
         await q.edit_message_text(
@@ -3687,46 +3698,7 @@ def _diff_my_matches(prev_states, current_matches, pt_id, watch_init_at=None):
         if cur["status"] != prev["status"] and cur["status"] == "CANCELED":
             events.append((f"❌ <b>Матч отменён</b>\n{label}", m))
 
-        # Счёт опубликован впервые + матч сыгран после включения мониторинга
-        match_after_init = True
-        if watch_init_at:
-            sd = m.get("start_date", "")
-            if sd and sd[:19] < watch_init_at[:19]:
-                match_after_init = False
-        if match_after_init and cur.get("score_sig") and not prev.get("score_sig"):
-            score_lines = []
-            my_total = 0; opp_total = 0
-            # Определяем какая команда моя
-            my_team_id = None
-            for team in m.get("teams", []):
-                if any(p.get("user_id") == pt_id for p in team.get("players", [])):
-                    my_team_id = team.get("team_id")
-                    break
-            for s in m.get("results", []) or []:
-                scores = s.get("scores") or []
-                if not scores: continue
-                # Пропускаем сеты без реальных очков
-                vals = {}
-                for entry in scores:
-                    if isinstance(entry, dict) and entry.get("score") is not None:
-                        vals[str(entry.get("team_id"))] = entry.get("score")
-                if not vals: continue
-                my = vals.get(str(my_team_id))
-                opp = next((v for k, v in vals.items() if k != str(my_team_id)), None)
-                if my is None or opp is None: continue
-                my_total += int(my); opp_total += int(opp)
-                set_name = s.get("name", "?").replace("Set-", "Сет ")
-                score_lines.append(f"  {set_name}: <b>{my}–{opp}</b>")
-            if score_lines:
-                won = "Победа" if my_total > opp_total else ("Поражение" if my_total < opp_total else "Ничья")
-                mid = m.get("match_id", "")
-                link = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
-                events.append((
-                    f'🏆 <b>Счёт матча опубликован — {won}</b>\n{label}\n'
-                    + "\n".join(score_lines) +
-                    f'\n<a href="{link}">Посмотреть матч</a>',
-                    m
-                ))
+        # Счёт отправляется отдельным сервисом score_watcher — здесь пропускаем.
 
         # Players composition changed — join/leave + slots
         joined = set(cur["player_ids"]) - set(prev["player_ids"])
@@ -3810,22 +3782,6 @@ async def watch_my_account(context: ContextTypes.DEFAULT_TYPE):
                 buttons.append(row)
                 kb = InlineKeyboardMarkup(buttons)
 
-            # Счёт опубликован — отправляем картинку с подписью
-            if text.startswith("🏆 <b>Счёт") and mid:
-                try:
-                    img_path = f"{DATA_DIR}/score_{mid}.png"
-                    render_score_image(m, pt_id, img_path)
-                    score_kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-                        "Открыть матч в Playtomic",
-                        url=f"https://app.playtomic.io/matches/{mid}?product_type=open_match")]])
-                    with open(img_path, "rb") as f:
-                        await context.bot.send_photo(chat_id, photo=f, caption=text,
-                            parse_mode="HTML", reply_markup=score_kb)
-                    continue
-                except Exception as e:
-                    log.warning("score image render failed: %s", e)
-                    # fallback — текстом
-
             await context.bot.send_message(chat_id, text, parse_mode="HTML",
                 disable_web_page_preview=True, reply_markup=kb)
 
@@ -3843,6 +3799,8 @@ async def cmd_my_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_user(uid, u)
         for job in context.job_queue.get_jobs_by_name(f"my_watch_{uid}"):
             job.schedule_removal()
+        for job in context.job_queue.get_jobs_by_name(f"score_watch_{uid}"):
+            job.schedule_removal()
         await update.message.reply_text("⏹ Мониторинг моего аккаунта остановлен.")
         return
 
@@ -3859,9 +3817,16 @@ async def cmd_my_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     for job in context.job_queue.get_jobs_by_name(f"my_watch_{uid}"):
         job.schedule_removal()
+    for job in context.job_queue.get_jobs_by_name(f"score_watch_{uid}"):
+        job.schedule_removal()
     context.job_queue.run_repeating(
         watch_my_account, interval=180, first=15,
         name=f"my_watch_{uid}", data={"uid": uid, "chat_id": chat_id},
+    )
+    context.job_queue.run_repeating(
+        score_watcher.watch_scores,
+        interval=score_watcher.JOB_INTERVAL_SEC, first=30,
+        name=f"score_watch_{uid}", data={"uid": uid, "chat_id": chat_id},
     )
     await update.message.reply_text(
         f"✅ Мониторинг моего аккаунта включён (проверка каждые 3 мин).\n\n"
@@ -4032,6 +3997,11 @@ async def post_init(application):
             application.job_queue.run_repeating(
                 watch_my_account, interval=180, first=30,
                 name=f"my_watch_{uid}", data={"uid": uid, "chat_id": chat_id},
+            )
+            application.job_queue.run_repeating(
+                score_watcher.watch_scores,
+                interval=score_watcher.JOB_INTERVAL_SEC, first=60,
+                name=f"score_watch_{uid}", data={"uid": uid, "chat_id": chat_id},
             )
             my_restored += 1
         # Free courts monitoring
