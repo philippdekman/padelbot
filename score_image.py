@@ -5,9 +5,12 @@ Style inspired by tennis broadcast scoreboards — column-per-set with the
 winning set underlined in the team's accent color.
 """
 from __future__ import annotations
-import io, json, urllib.request, logging, hashlib
+import io, json, os, urllib.request, logging, hashlib
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
+
+_FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+_NOTO_PATH = os.path.join(_FONT_DIR, "NotoSans-Regular.ttf")
 
 log = logging.getLogger(__name__)
 
@@ -56,9 +59,27 @@ MONTH_RU = ["", "января", "февраля", "марта", "апреля", 
 
 
 def _font(size, bold=False):
+    # Bundled Noto Sans (variable font) — has full Cyrillic support.
+    if os.path.exists(_NOTO_PATH):
+        try:
+            f = ImageFont.truetype(_NOTO_PATH, size)
+            try:
+                f.set_variation_by_axes([700 if bold else 400, 100])
+            except Exception:
+                # Older Pillow / static fallback
+                try:
+                    f.set_variation_by_name("Bold" if bold else "Regular")
+                except Exception:
+                    pass
+            return f
+        except Exception as e:
+            log.warning("noto font load failed: %s", e)
+    # System fallbacks (DejaVu typically has Cyrillic, but not guaranteed on slim images)
     paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
         else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf" if bold
+        else "/usr/share/fonts/dejavu/DejaVuSans.ttf",
         "/System/Library/Fonts/Helvetica.ttc",
     ]
     for p in paths:
