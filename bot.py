@@ -2527,6 +2527,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                       for m in matches_my if m.get("match_id")}
         u["my_match_states"] = new_states
         u["my_account_active"] = True
+        u["my_watch_init_at"] = datetime.utcnow().isoformat()
         u["chat_id"] = q.message.chat_id
         set_user(uid, u)
         for job in context.job_queue.get_jobs_by_name(f"my_watch_{uid}"):
@@ -3535,9 +3536,9 @@ def _my_match_state(m, pt_id):
         "score_sig": score_sig,
     }
 
-def _diff_my_matches(prev_states, current_matches, pt_id):
+def _diff_my_matches(prev_states, current_matches, pt_id, watch_init_at=None):
     """Compare previous snapshot vs current. Returns list of (text, match_or_None) tuples.
-    text — готовый HTML-блок, match — объект матча для кнопок (None — без кнопок)."""
+    watch_init_at: ISO timestamp — алерты о счёте только для матчей start_date ≥ включения."""
     events = []
     today = datetime.utcnow().date().isoformat()
     # Берём все матчи юзера — включая недавние прошедшие (для отслеживания публикации счёта)
@@ -3590,8 +3591,13 @@ def _diff_my_matches(prev_states, current_matches, pt_id):
         if cur["status"] != prev["status"] and cur["status"] == "CANCELED":
             events.append((f"❌ <b>Матч отменён</b>\n{label}", m))
 
-        # Счёт опубликован впервые: раньше было пусто — сейчас появились очки.
-        if cur.get("score_sig") and not prev.get("score_sig"):
+        # Счёт опубликован впервые + матч сыгран после включения мониторинга
+        match_after_init = True
+        if watch_init_at:
+            sd = m.get("start_date", "")
+            if sd and sd[:19] < watch_init_at[:19]:
+                match_after_init = False
+        if match_after_init and cur.get("score_sig") and not prev.get("score_sig"):
             score_lines = []
             my_total = 0; opp_total = 0
             # Определяем какая команда моя
@@ -3687,7 +3693,7 @@ async def watch_my_account(context: ContextTypes.DEFAULT_TYPE):
     prev_states = u.get("my_match_states", {})
     new_states = {m["match_id"]: _my_match_state(m, pt_id)
                   for m in matches if m.get("match_id")}
-    events = _diff_my_matches(prev_states, matches, pt_id)
+    events = _diff_my_matches(prev_states, matches, pt_id, watch_init_at=u.get("my_watch_init_at"))
     u["my_match_states"] = new_states
     set_user(uid, u)
     if events:
@@ -3733,6 +3739,7 @@ async def cmd_my_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   for m in matches if m.get("match_id")}
     u["my_match_states"] = new_states
     u["my_account_active"] = True
+    u["my_watch_init_at"] = datetime.utcnow().isoformat()
     u["chat_id"] = update.effective_chat.id
     set_user(uid, u)
 
