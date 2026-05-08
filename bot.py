@@ -13,6 +13,7 @@ Features:
 
 import os, json, logging, asyncio, re
 import courts, rating
+from score_image import render_score_image
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import urllib.request, urllib.error
@@ -1101,6 +1102,7 @@ def _main_menu_kb(u, context, uid):
     my_on = bool(context.job_queue.get_jobs_by_name(f"my_watch_{uid}"))
     rows += [
         [InlineKeyboardButton("Мои матчи — добавить в календарь, открыть маршрут", callback_data="my_schedule")],
+        [InlineKeyboardButton("Прошедшие матчи — картинка счёта", callback_data="my_results")],
         [InlineKeyboardButton("PDF календарь", callback_data="pdf_menu")],
         [InlineKeyboardButton("Мой рейтинг и динамика", callback_data="rating_menu")],
         [InlineKeyboardButton(
@@ -2707,6 +2709,100 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── My schedule button ──
+    # ── Прошедшие матчи: картинка счёта ──
+    if data == "my_results":
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id:
+            await _need_link(q); return
+        await q.edit_message_text("Загружаю прошедшие матчи...")
+        chat_id = q.message.chat_id
+        matches = playtomic_user_matches(pt_id)
+        today = datetime.utcnow().date().isoformat()
+        finished = []
+        for m in matches:
+            # Counted as finished if has score OR start_date in past
+            has_score = bool(m.get("results"))
+            sd = m.get("start_date", "")
+            in_past = sd and sd[:10] < today
+            if (has_score or in_past) and m.get("status") != "CANCELED":
+                finished.append(m)
+        finished.sort(key=lambda x: x.get("start_date", ""), reverse=True)
+        finished = finished[:10]
+
+        if not finished:
+            await context.bot.send_message(chat_id, "Прошедших матчей нет.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+            return
+        for m in finished:
+            mid = m.get("match_id", "")
+            club = m.get("location", "?")
+            sd_raw = m.get("start_date", "")
+            try:
+                dt = datetime.strptime(sd_raw[:19], "%Y-%m-%dT%H:%M:%S")
+                dt_str = dt.strftime("%d.%m.%Y")
+            except Exception:
+                dt_str = "?"
+            # Счёт строкой
+            my_team_id = None
+            for team in m.get("teams", []):
+                if any(p.get("user_id") == pt_id for p in team.get("players", [])):
+                    my_team_id = team.get("team_id"); break
+            sets_strs = []
+            my_total = opp_total = 0
+            for s in m.get("results", []) or []:
+                vals = {str(e.get("team_id")): e.get("score") for e in (s.get("scores") or [])
+                        if isinstance(e, dict) and e.get("score") is not None}
+                if not vals: continue
+                my = vals.get(str(my_team_id))
+                opp = next((v for k, v in vals.items() if k != str(my_team_id)), None)
+                if my is None or opp is None: continue
+                my_total += int(my); opp_total += int(opp)
+                sets_strs.append(f"{my}–{opp}")
+            if sets_strs:
+                outcome = "Победа" if my_total > opp_total else ("Поражение" if my_total < opp_total else "Ничья")
+                score_line = f"{outcome}: {' · '.join(sets_strs)}"
+            else:
+                score_line = "Счёт не опубликован"
+            text = f"<b>{dt_str}</b> — {club}\n{score_line}"
+            buttons = []
+            if sets_strs:
+                buttons.append([InlineKeyboardButton("Картинка счёта для соцсетей", callback_data=f"score_{mid}")])
+            buttons.append([InlineKeyboardButton("Открыть в Playtomic",
+                url=f"https://app.playtomic.io/matches/{mid}?product_type=open_match")])
+            await context.bot.send_message(chat_id, text, parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons))
+        return
+
+    # ── Картинка счёта по match_id ──
+    if data and data.startswith("score_"):
+        match_id = data[6:]
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id:
+            await _need_link(q); return
+        chat_id = q.message.chat_id
+        await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+        matches = playtomic_user_matches(pt_id)
+        m = next((x for x in matches if x.get("match_id") == match_id), None)
+        if not m:
+            await context.bot.send_message(chat_id, "Матч не найден.")
+            return
+        if not m.get("results"):
+            await context.bot.send_message(chat_id, "Счёт ещё не опубликован.")
+            return
+        try:
+            img_path = f"{DATA_DIR}/score_{match_id}.png"
+            render_score_image(m, pt_id, img_path)
+            with open(img_path, "rb") as f:
+                await context.bot.send_photo(chat_id, photo=f,
+                    caption="Готово к публикации в соцсетях.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                        "Открыть матч в Playtomic",
+                        url=f"https://app.playtomic.io/matches/{match_id}?product_type=open_match")]]))
+        except Exception as e:
+            log.warning("manual score image failed: %s", e)
+            await context.bot.send_message(chat_id, f"Не удалось собрать картинку: {e}")
+        return
+
     if data == "my_schedule":
         pt_id = u.get("playtomic_user_id")
         if not pt_id:
@@ -3700,8 +3796,8 @@ async def watch_my_account(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id, "<b>Изменения в моём расписании:</b>", parse_mode="HTML")
         for text, m in events:
             kb = None
-            if m and m.get("match_id"):
-                mid = m["match_id"]
+            mid = m.get("match_id") if m else None
+            if mid:
                 buttons = []
                 gc = gcal_link(m)
                 gm = gmaps_link(m)
@@ -3713,6 +3809,23 @@ async def watch_my_account(context: ContextTypes.DEFAULT_TYPE):
                 if gm: row.append(InlineKeyboardButton("Маршрут", url=gm))
                 buttons.append(row)
                 kb = InlineKeyboardMarkup(buttons)
+
+            # Счёт опубликован — отправляем картинку с подписью
+            if text.startswith("🏆 <b>Счёт") and mid:
+                try:
+                    img_path = f"{DATA_DIR}/score_{mid}.png"
+                    render_score_image(m, pt_id, img_path)
+                    score_kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                        "Открыть матч в Playtomic",
+                        url=f"https://app.playtomic.io/matches/{mid}?product_type=open_match")]])
+                    with open(img_path, "rb") as f:
+                        await context.bot.send_photo(chat_id, photo=f, caption=text,
+                            parse_mode="HTML", reply_markup=score_kb)
+                    continue
+                except Exception as e:
+                    log.warning("score image render failed: %s", e)
+                    # fallback — текстом
+
             await context.bot.send_message(chat_id, text, parse_mode="HTML",
                 disable_web_page_preview=True, reply_markup=kb)
 
