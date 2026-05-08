@@ -5,11 +5,36 @@ Style inspired by tennis broadcast scoreboards — column-per-set with the
 winning set underlined in the team's accent color.
 """
 from __future__ import annotations
-import io, urllib.request, logging, hashlib
+import io, json, urllib.request, logging, hashlib
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
 
 log = logging.getLogger(__name__)
+
+# Tiny in-process cache to avoid re-fetching profiles for the same render.
+_PROFILE_CACHE: dict[str, str | None] = {}
+
+
+def _fetch_profile_picture(user_id: str) -> str | None:
+    """Get the avatar URL from /v2/users/{user_id}. Cached per process."""
+    if not user_id:
+        return None
+    if user_id in _PROFILE_CACHE:
+        return _PROFILE_CACHE[user_id]
+    try:
+        req = urllib.request.Request(
+            f"https://api.playtomic.io/v2/users/{user_id}",
+            headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = json.loads(r.read())
+        url = data.get("picture") or None
+        _PROFILE_CACHE[user_id] = url
+        return url
+    except Exception as e:
+        log.warning("profile fetch failed for %s: %s", user_id, e)
+        _PROFILE_CACHE[user_id] = None
+        return None
+
 
 W, H = 1080, 1080
 
@@ -93,7 +118,9 @@ def _initials_avatar(name: str, size: int):
 
 def _avatar_circle(p, size):
     name = p.get("full_name") or p.get("name") or "?"
-    return _fetch_avatar(p.get("picture", ""), size) or _initials_avatar(name, size)
+    # Try the picture inline on the match payload first; fall back to /v2/users
+    url = p.get("picture") or _fetch_profile_picture(str(p.get("user_id") or ""))
+    return _fetch_avatar(url, size) or _initials_avatar(name, size)
 
 
 def _ring(img, x, y, size, color, width=4):
@@ -243,8 +270,8 @@ def render_score_image(match: dict, my_user_id: str, output_path: str):
             (sb_x + sb_w - name_pad, row_top_y + row_h)],
            fill=LINE, width=2)
 
-    f_name = _font(26, bold=True)
-    f_lvl = _font(20)
+    f_name = _font(24, bold=True)
+    f_lvl = _font(19)
     f_team_lbl = _font(18, bold=True)
     f_score = _font(64, bold=True)
     f_total = _font(64, bold=True)
@@ -274,19 +301,26 @@ def render_score_image(match: dict, my_user_id: str, output_path: str):
         d.text((text_x, cy - avatar_size // 2 - 2), team_lbl,
                fill=accent if is_mine else DIM, font=f_team_lbl)
 
-        # Names: stacked vertically (max 2)
+        # Names with inline rating: "Andreas Evdokiou  1.93"
         for i, p in enumerate(players):
-            name = p.get("full_name") or p.get("name") or "?"
+            name = (p.get("full_name") or p.get("name") or "?").strip()
             lvl = p.get("level_value")
-            name_short = _truncate(name, f_name, text_max_w - 80, d)
-            d.text((text_x, cy - avatar_size // 2 + 26 + i * 36), name_short,
-                   fill=TEXT, font=f_name)
+            line_y = cy - avatar_size // 2 + 26 + i * 36
             if lvl is not None:
                 lvl_str = f"{lvl:.2f}"
                 bb_l = d.textbbox((0, 0), lvl_str, font=f_lvl)
-                d.text((text_x + text_max_w - (bb_l[2] - bb_l[0]),
-                        cy - avatar_size // 2 + 30 + i * 36),
+                lvl_w = bb_l[2] - bb_l[0]
+                gap = 14
+                name_max = text_max_w - lvl_w - gap
+                name_short = _truncate(name, f_name, name_max, d)
+                bb_n = d.textbbox((0, 0), name_short, font=f_name)
+                d.text((text_x, line_y), name_short, fill=TEXT, font=f_name)
+                # Rating right after the name (not flush right)
+                d.text((text_x + (bb_n[2] - bb_n[0]) + gap, line_y + 6),
                        lvl_str, fill=DIM, font=f_lvl)
+            else:
+                name_short = _truncate(name, f_name, text_max_w, d)
+                d.text((text_x, line_y), name_short, fill=TEXT, font=f_name)
 
     draw_team_row(team_my, True, 0)
     draw_team_row(team_opp, False, 1)

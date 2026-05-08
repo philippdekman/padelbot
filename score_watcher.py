@@ -12,8 +12,10 @@ The job itself ticks every 10 min; per-match `next_check_at` timestamps in
 user settings throttle when each match is actually examined.
 
 State (in user settings):
-  notified_scores:   list[match_id]      — already announced, skip forever
-  score_check_state: { match_id: {"next_check_at": iso} }
+  notified_scores:    list[match_id]      — already announced, skip forever
+  score_check_state:  { match_id: {"next_check_at": iso} }
+  score_message_ids:  list[int]            — message_ids of sent score photos
+                                              (used by "clear score messages" cmd)
 
 Pulls scores in any status (incl. VALIDATING) — no need to wait for CONFIRMED.
 """
@@ -167,25 +169,31 @@ async def watch_scores(context: ContextTypes.DEFAULT_TYPE):
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(
                 "Открыть матч в Playtomic",
                 url=f"https://app.playtomic.io/matches/{mid}?product_type=open_match")]])
+            sent_msg = None
             try:
                 img_path = f"{DATA_DIR}/score_{mid}.png"
                 render_score_image(m, pt_id, img_path)
                 with open(img_path, "rb") as f:
-                    await context.bot.send_photo(chat_id, photo=f, caption=caption,
-                                                 parse_mode="HTML", reply_markup=kb)
+                    sent_msg = await context.bot.send_photo(
+                        chat_id, photo=f, caption=caption,
+                        parse_mode="HTML", reply_markup=kb)
             except Exception as e:
                 log.warning("score_watcher: image send failed for %s: %s", mid, e)
                 try:
-                    await context.bot.send_message(chat_id, caption,
-                                                   parse_mode="HTML",
-                                                   disable_web_page_preview=True,
-                                                   reply_markup=kb)
+                    sent_msg = await context.bot.send_message(
+                        chat_id, caption, parse_mode="HTML",
+                        disable_web_page_preview=True, reply_markup=kb)
                 except Exception:
                     continue
             notified.add(mid)
             state.pop(mid, None)
             state_changed = True
             sent += 1
+            # Track message_id for the "clear score messages" command
+            if sent_msg is not None:
+                msg_ids = list(u.get("score_message_ids") or [])
+                msg_ids.append(int(sent_msg.message_id))
+                u["score_message_ids"] = msg_ids[-500:]
         else:
             # Schedule next check based on adaptive cadence
             if elapsed < FAST_WINDOW:
