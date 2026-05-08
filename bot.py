@@ -3563,16 +3563,9 @@ def _diff_my_matches(prev_states, current_matches, pt_id):
                     events.append((f"➕ <b>Добавлен в матч</b>\n{label}", m))
             continue
 
-        # Status changed
-        if cur["status"] != prev["status"]:
-            if cur["status"] == "CONFIRMED":
-                events.append((f"✅ <b>Матч подтверждён</b>\n{label}", m))
-            elif cur["status"] == "CANCELED":
-                events.append((f"❌ <b>Матч отменён</b>\n{label}", m))
-            elif cur["status"] == "EXPIRED":
-                events.append((f"⚠️ <b>Матч истёк</b>\n{label}", m))
-            else:
-                events.append((f"🔄 <b>Статус изменён</b> ({prev['status']} → {cur['status']})\n{label}", m))
+        # Статус — выводим только реальные отмены. Истечение/подтверждение — шум.
+        if cur["status"] != prev["status"] and cur["status"] == "CANCELED":
+            events.append((f"❌ <b>Матч отменён</b>\n{label}", m))
 
         # Players composition changed — join/leave + slots
         joined = set(cur["player_ids"]) - set(prev["player_ids"])
