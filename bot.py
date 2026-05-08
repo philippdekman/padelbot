@@ -3512,12 +3512,16 @@ def _my_match_state(m, pt_id):
     max_p = sum(t.get("max_players", 0) for t in m.get("teams", []))
     join_info = m.get("join_requests_info") or {}
     my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
-    # Снимок счёта (сигнатура результатов)
+    # Снимок счёта — включаем только сеты с реальными очками
     score_sig = ""
     for s in m.get("results", []) or []:
         scores = s.get("scores") or []
-        if scores:
-            score_sig += f"{s.get('name','?')}:{','.join(str(x) for x in scores)};"
+        vals = []
+        for entry in scores:
+            if isinstance(entry, dict) and entry.get("score") is not None:
+                vals.append(f"{entry.get('team_id')}={entry.get('score')}")
+        if vals:
+            score_sig += f"{s.get('name','?')}:{','.join(vals)};"
     return {
         "status": m.get("status"),
         "player_ids": sorted([p.get("user_id") for p in players]),
@@ -3586,22 +3590,41 @@ def _diff_my_matches(prev_states, current_matches, pt_id):
         if cur["status"] != prev["status"] and cur["status"] == "CANCELED":
             events.append((f"❌ <b>Матч отменён</b>\n{label}", m))
 
-        # Счёт опубликован впервые (сигнатура была пустая → появилась) или изменилась
-        if cur.get("score_sig") and cur.get("score_sig") != prev.get("score_sig"):
+        # Счёт опубликован впервые: раньше было пусто — сейчас появились очки.
+        if cur.get("score_sig") and not prev.get("score_sig"):
             score_lines = []
+            my_total = 0; opp_total = 0
+            # Определяем какая команда моя
+            my_team_id = None
+            for team in m.get("teams", []):
+                if any(p.get("user_id") == pt_id for p in team.get("players", [])):
+                    my_team_id = team.get("team_id")
+                    break
             for s in m.get("results", []) or []:
                 scores = s.get("scores") or []
-                if scores:
-                    pretty = " – ".join(str(x) for x in scores)
-                    score_lines.append(f"  {s.get('name','?')}: <b>{pretty}</b>")
-            score_block = ("\n" + "\n".join(score_lines)) if score_lines else ""
-            mid = m.get("match_id", "")
-            link = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
-            events.append((
-                f'🏆 <b>Опубликован счёт матча</b>\n{label}{score_block}\n'
-                f'<a href="{link}">Посмотреть матч</a>',
-                m
-            ))
+                if not scores: continue
+                # Пропускаем сеты без реальных очков
+                vals = {}
+                for entry in scores:
+                    if isinstance(entry, dict) and entry.get("score") is not None:
+                        vals[str(entry.get("team_id"))] = entry.get("score")
+                if not vals: continue
+                my = vals.get(str(my_team_id))
+                opp = next((v for k, v in vals.items() if k != str(my_team_id)), None)
+                if my is None or opp is None: continue
+                my_total += int(my); opp_total += int(opp)
+                set_name = s.get("name", "?").replace("Set-", "Сет ")
+                score_lines.append(f"  {set_name}: <b>{my}–{opp}</b>")
+            if score_lines:
+                won = "Победа" if my_total > opp_total else ("Поражение" if my_total < opp_total else "Ничья")
+                mid = m.get("match_id", "")
+                link = f"https://app.playtomic.io/matches/{mid}?product_type=open_match"
+                events.append((
+                    f'🏆 <b>Счёт матча опубликован — {won}</b>\n{label}\n'
+                    + "\n".join(score_lines) +
+                    f'\n<a href="{link}">Посмотреть матч</a>',
+                    m
+                ))
 
         # Players composition changed — join/leave + slots
         joined = set(cur["player_ids"]) - set(prev["player_ids"])
