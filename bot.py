@@ -320,6 +320,10 @@ def filter_matches(matches, cfg, loc_dates):
         # All public matches have visibility=VISIBLE — include everything visible.
         if m.get("visibility") and m.get("visibility") != "VISIBLE":
             continue
+        # Пропускаем женские матчи по названию/описанию/локации
+        if (_is_female_only(m.get("name", "")) or _is_female_only(m.get("description", ""))
+            or _is_female_only(m.get("location", ""))):
+            continue
 
         dt = parse_dt(m.get("start_date"))
         local_dt = _to_local(dt, loc_name) if dt else None
@@ -391,6 +395,16 @@ def filter_matches(matches, cfg, loc_dates):
         result.append(m)
     return result
 
+FEMALE_KEYWORDS = ("lady", "ladies", "girl", "girls", "women", "female",
+                   "женский", "женская", "девушк", "женщин")
+
+def _is_female_only(text: str) -> bool:
+    if not text:
+        return False
+    t = text.lower()
+    return any(k in t for k in FEMALE_KEYWORDS)
+
+
 def filter_tournaments(tournaments, cfg, loc_dates):
     result = []
     date_from = loc_dates.get("from")
@@ -407,6 +421,9 @@ def filter_tournaments(tournaments, cfg, loc_dates):
         if t.get("is_cancelled"):
             continue
         if t.get("tournament_status") not in (None, "REGISTRATION_OPEN", "OPEN", "PENDING"):
+            continue
+        # Пропускаем женские турниры
+        if _is_female_only(t.get("name", "")) or _is_female_only(t.get("description", "")):
             continue
 
         dt = parse_dt(t.get("start_date"))
@@ -687,16 +704,10 @@ def do_search(w):
 
 def event_key(ev):
     if ev.get("platform") == "matchi":
-        # MATCHi: activity + date (same activity on different dates = different events)
         return f"matchi_{ev.get('activity_id', '')}_{ev.get('date', '')}"
-    eid = ev.get("match_id") or ev.get("tournament_id") or ev.get("id", "")
-    if ev.get("tournament_id"):
-        # Tournament: include available_places so it reappears when spot opens
-        avail = ev.get("available_places", len(ev.get("registered_players", [])))
-        return f"{eid}_avail{avail}"
-    # Match: just match_id. If a low-level player leaves, the match
-    # was previously filtered out (not in seen) → now passes filter → appears as new.
-    return eid
+    # Для всех эвентов (матчей и турниров) ключ — только ID. Изменение числа
+    # участников не считается «новым» событием.
+    return ev.get("match_id") or ev.get("tournament_id") or ev.get("id", "")
 
 def _get_event_dt(ev):
     """Get datetime for sorting any event type, converted to local time."""
