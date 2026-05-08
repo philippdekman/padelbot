@@ -30,6 +30,10 @@ FAST_WINDOW = timedelta(hours=2)    # 0-2h after end → 10 min cadence
 SLOW_WINDOW = timedelta(hours=48)   # 2-48h after end → 3h cadence
 SLOW_GAP = timedelta(hours=3)
 FAST_GAP = timedelta(minutes=10)
+# Hard cap: only react to matches that ended within this window from now.
+# Anything older is considered "history" — ignored to prevent spam on first
+# run / new service install / bot restart picking up archived results.
+MAX_AGE_AFTER_END = timedelta(hours=24)
 
 
 def has_published_score(match: dict) -> bool:
@@ -143,6 +147,14 @@ async def watch_scores(context: ContextTypes.DEFAULT_TYPE):
             continue  # not finished yet
 
         elapsed = now - end_dt
+        # Skip ancient finished matches — prevents spam on first run.
+        if elapsed > MAX_AGE_AFTER_END:
+            # Mark as final so we never look at it again.
+            if mid not in notified:
+                notified.add(mid)
+                state.pop(mid, None)
+                state_changed = True
+            continue
         # Throttle by per-match next_check_at
         per = state.get(mid) or {}
         nxt = _parse_iso(per.get("next_check_at"))
