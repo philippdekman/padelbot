@@ -270,18 +270,30 @@ def match_max_players(m):
     return sum(t.get("max_players", 0) for t in m.get("teams", []))
 
 def match_level_range(m):
-    """Extract min/max level from match players or restrictions."""
-    levels = []
-    for team in m.get("teams", []):
-        for p in team.get("players", []):
-            lv = p.get("level_value")
-            if lv is not None:
-                levels.append(float(lv))
+    """Return the organizer-set level range for the match.
+
+    Playtomic returns the restriction directly as `min_level` / `max_level`
+    on the match object (not under `skill_level_restriction`). Fall back to
+    actual joined-player levels only when the organizer didn't set a range.
+    """
+    rmin = m.get("min_level")
+    rmax = m.get("max_level")
+    if rmin is not None or rmax is not None:
+        try:
+            return (float(rmin) if rmin is not None else 0.0,
+                    float(rmax) if rmax is not None else 10.0)
+        except Exception:
+            pass
+    # Legacy nested form (some endpoints used to return this) — keep as fallback
     restriction = m.get("skill_level_restriction") or {}
-    rmin = restriction.get("min")
-    rmax = restriction.get("max")
+    rmin = restriction.get("min"); rmax = restriction.get("max")
     if rmin is not None:
-        return float(rmin), float(rmax) if rmax else 10.0
+        try:
+            return float(rmin), float(rmax) if rmax else 10.0
+        except Exception:
+            pass
+    levels = [float(p["level_value"]) for team in m.get("teams", [])
+              for p in team.get("players", []) if p.get("level_value") is not None]
     if levels:
         return min(levels), max(levels)
     return None, None
@@ -359,29 +371,20 @@ def filter_matches(matches, cfg, loc_dates):
                     continue
             except: pass
 
-        # Level filter — check by average player level
+        # Level filter — use organizer-set range from match_level_range()
         if level_min is not None or level_max is not None:
-            restriction = m.get("skill_level_restriction") or {}
-            r_min = restriction.get("min")
-            r_max = restriction.get("max")
-            if r_min is not None:
-                # Match has explicit level restriction
+            r_min, r_max = match_level_range(m)
+            if r_min is not None or r_max is not None:
                 try:
-                    if level_min is not None and float(level_min) > float(r_max or 10):
+                    rmn = r_min if r_min is not None else 0.0
+                    rmx = r_max if r_max is not None else 10.0
+                    # Skip if user's [min,max] doesn't overlap with match [rmn,rmx]
+                    if level_min is not None and float(level_min) > rmx:
                         continue
-                    if level_max is not None and float(level_max) < float(r_min):
+                    if level_max is not None and float(level_max) < rmn:
                         continue
-                except: pass
-            else:
-                # No restriction — check actual player levels
-                player_levels = [float(p.get("level_value")) for team in m.get("teams", [])
-                                 for p in team.get("players", []) if p.get("level_value") is not None]
-                if player_levels:
-                    # Skip if ANY player is below user's min level
-                    if level_min is not None and min(player_levels) < level_min:
-                        continue
-                    if level_max is not None and max(player_levels) > level_max + 0.5:
-                        continue
+                except Exception:
+                    pass
 
         # Min players
         if match_players(m) < min_pl:
