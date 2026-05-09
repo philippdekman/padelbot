@@ -25,12 +25,29 @@ def fetch_user_matches(pt_id: str) -> list:
         return []
 
 
+# Statuses where the player's level_value is the post-match rating snapshot.
+# PENDING / TBD belong to FUTURE matches — the level there reflects whoever
+# else has joined, not the user's current rating. Skip them.
+_PLAYED_STATUSES = {"CONFIRMED", "VALIDATING", "FINISHED", "COMPLETED"}
+
+
 def history_from_matches(matches: list, pt_id: str) -> list:
-    """Возвращает [(date, level_value), ...] отсортированный по дате (asc)."""
+    """Return [(date, level_value), ...] sorted asc, only from PLAYED matches.
+
+    A user's current rating is only reliable on matches that have actually
+    been played. Future matches (PENDING/TBD) report level_value = whatever
+    composition they have right now, which adds spurious history points.
+    """
     items = []
+    today = datetime.utcnow().date().isoformat()
     for m in matches:
         sd = m.get("start_date", "")[:10]
         if not sd:
+            continue
+        status = (m.get("status") or "").upper()
+        # Played statuses, OR a past start_date if status is missing
+        played = status in _PLAYED_STATUSES or (sd < today and status != "CANCELED")
+        if not played:
             continue
         for team in m.get("teams", []):
             for p in team.get("players", []):
@@ -38,7 +55,7 @@ def history_from_matches(matches: list, pt_id: str) -> list:
                     items.append((sd, float(p["level_value"])))
                     break
     items.sort()
-    # Убираем дубли в один день — берём последний рейтинг
+    # Dedup per day — last value of the day wins
     by_day = {}
     for d, lv in items:
         by_day[d] = lv
