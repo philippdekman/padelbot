@@ -45,6 +45,7 @@ log.info(f"Settings file: {SETTINGS_FILE}")
 LOCATIONS = {
     "Lahti":    {"lat": 61.0054, "lon": 25.4834, "tz": "Europe/Helsinki"},
     "Limassol": {"lat": 34.6841, "lon": 33.0379, "tz": "Asia/Nicosia"},
+    "Aphrodite": {"lat": 34.7167, "lon": 32.6167, "tz": "Asia/Nicosia"},
 }
 
 # MATCHi facility slugs per location (only those with activities AND within typical radius)
@@ -53,6 +54,7 @@ MATCHI_FACILITIES = {
         "padelmarina",        # Sisäpelikeskus PadelMarina, Hollola
     ],
     "Limassol": [],   # No MATCHi facilities with activities in Cyprus
+    "Aphrodite": [],  # MATCHi not present in this area
     "Helsinki": [     # Available if user adds Helsinki as a location
         "opmyllypuro",        # Open Padel Myllypuro
         "opkaivoksela",       # Open Padel & Golf Kaivoksela
@@ -876,7 +878,9 @@ def kb_location():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📍 Lahti", callback_data="loc_Lahti"),
          InlineKeyboardButton("📍 Limassol", callback_data="loc_Limassol")],
-        [InlineKeyboardButton("📍 Обе", callback_data="loc_both")],
+        [InlineKeyboardButton("📍 Aphrodite (между Лимассол и Пафос)", callback_data="loc_Aphrodite")],
+        [InlineKeyboardButton("📍 Весь Кипр (Limassol + Aphrodite)", callback_data="loc_cy_all")],
+        [InlineKeyboardButton("📍 Lahti + Limassol", callback_data="loc_both")],
     ])
 
 def kb_radius(km):
@@ -3558,7 +3562,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Location ──
     if data.startswith("loc_"):
         choice = data[4:]
-        w["locations"] = ["Lahti", "Limassol"] if choice == "both" else [choice]
+        if choice == "both":
+            w["locations"] = ["Lahti", "Limassol"]
+        elif choice == "cy_all":
+            w["locations"] = ["Limassol", "Aphrodite"]
+        else:
+            w["locations"] = [choice]
         w["step"] = "radius"
         set_user(uid, u)
         await show_step(q, uid, context)
