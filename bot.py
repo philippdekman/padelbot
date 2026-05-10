@@ -371,20 +371,25 @@ def filter_matches(matches, cfg, loc_dates):
                     continue
             except: pass
 
-        # Level filter — use organizer-set range from match_level_range()
+        # Level filter — match's range must FULLY CONTAIN the user's range.
+        # The user picks the level band they actually want to play in; a match
+        # that only partially overlaps either blocks them or is too far off.
         if level_min is not None or level_max is not None:
             r_min, r_max = match_level_range(m)
             if r_min is not None or r_max is not None:
                 try:
                     rmn = r_min if r_min is not None else 0.0
                     rmx = r_max if r_max is not None else 10.0
-                    # Skip if user's [min,max] doesn't overlap with match [rmn,rmx]
-                    if level_min is not None and float(level_min) > rmx:
+                    eps = 0.01  # allow a tiny float rounding slack
+                    if level_min is not None and rmn > float(level_min) + eps:
                         continue
-                    if level_max is not None and float(level_max) < rmn:
+                    if level_max is not None and rmx < float(level_max) - eps:
                         continue
                 except Exception:
                     pass
+            else:
+                # Match has no declared level range — skip it when the user set one.
+                continue
 
         # Min players
         if match_players(m) < min_pl:
