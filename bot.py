@@ -2614,6 +2614,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # daily_w_<YYYY-MM-DD>_<HHMM_HHMM>
         rest = data[len("daily_w_"):]
         parts = rest.rsplit("_", 2)
+        date_key = ""
+        confirm = ""
         if len(parts) == 3:
             date_key = parts[0]
             hhmm_from = parts[1]
@@ -2624,33 +2626,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur = daily.get(date_key, [])
             if window in cur:
                 cur.remove(window)
-                msg = f"Убрано: {window}"
+                confirm = f"❌ Убрано: {window}"
             else:
                 cur.append(window); cur.sort()
-                msg = f"Добавлено: {window}"
+                confirm = f"✅ Добавлено: {window} — будет мониториться"
             if cur:
                 daily[date_key] = cur
             else:
                 daily.pop(date_key, None)
             set_user(uid, u)
-            await q.answer(msg)
-            # Re-render the day editor
-            context.user_data["_simulate_data"] = f"daily_d_{date_key}"
-        # Re-trigger by calling the same handler logic recursively via send
-        # Simpler: rebuild day editor inline
+            await q.answer(confirm.split(" — ")[0], show_alert=False)
         u = get_user(uid)
         w = u.get("wizard") or {}
         daily = w.get("daily_windows") or {}
-        try:
-            date_key
-        except NameError:
-            date_key = ""
         cur = daily.get(date_key, [])
         try:
             dt = datetime.strptime(date_key, "%Y-%m-%d"); ds = dt.strftime("%a %d.%m")
         except Exception:
             ds = date_key
-        text = f"<b>{ds}</b>\nТекущие окна: " + (", ".join(cur) if cur else "нет")
+        text = (confirm + "\n\n" if confirm else "")
+        text += f"<b>{ds}</b>\nТекущие окна: " + (", ".join(cur) if cur else "нет")
         text += "\n\nВыбери окно:"
         presets = [
             ("Утро (07–12)", "07:00-12:00"),
