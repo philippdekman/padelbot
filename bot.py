@@ -353,23 +353,9 @@ def filter_matches(matches, cfg, loc_dates):
                     continue
             except: pass
 
-        # ★ Time filter — event START TIME in LOCAL timezone
-        if local_dt and time_from:
-            try:
-                hh, mm = map(int, time_from.split(":"))
-                event_mins = local_dt.hour * 60 + local_dt.minute
-                filter_mins = hh * 60 + mm
-                if event_mins < filter_mins:
-                    continue
-            except: pass
-        if local_dt and time_to:
-            try:
-                hh, mm = map(int, time_to.split(":"))
-                event_mins = local_dt.hour * 60 + local_dt.minute
-                filter_mins = hh * 60 + mm
-                if event_mins > filter_mins:
-                    continue
-            except: pass
+        # Time filter — per-day windows if set, otherwise global time_from/to
+        if not _time_filter_passes(local_dt, cfg):
+            continue
 
         # Level filter — match's range must FULLY CONTAIN the user's range.
         # The user picks the level band they actually want to play in; a match
@@ -403,6 +389,61 @@ def filter_matches(matches, cfg, loc_dates):
 
         result.append(m)
     return result
+
+def _parse_hhmm_to_mins(s: str):
+    try:
+        hh, mm = map(int, s.split(":"))
+        return hh * 60 + mm
+    except Exception:
+        return None
+
+
+def _time_filter_passes(local_dt, cfg):
+    """Return True if the event's local time passes the configured time filter.
+
+    Priority:
+      1) daily_windows: {"YYYY-MM-DD": ["HH:MM-HH:MM", ...]} — if the event's
+         date is a key, only those windows on that date are allowed.
+         Any event on a date NOT in daily_windows is blocked.
+      2) Legacy time_from / time_to: global window applied to every day.
+
+    If daily_windows is set but empty ({}), we treat it as "no day is allowed"
+    for safety — the user can clear the dict to fall back to legacy behaviour.
+    """
+    if not local_dt:
+        return True
+    daily = cfg.get("daily_windows") or {}
+    if daily:
+        day_key = local_dt.date().isoformat()
+        windows = daily.get(day_key)
+        if not windows:
+            return False
+        event_mins = local_dt.hour * 60 + local_dt.minute
+        for w in windows:
+            try:
+                fr, to = w.split("-", 1)
+                f = _parse_hhmm_to_mins(fr.strip())
+                t = _parse_hhmm_to_mins(to.strip())
+                if f is None or t is None:
+                    continue
+                if f <= event_mins <= t:
+                    return True
+            except Exception:
+                continue
+        return False
+    # Legacy single-window filter
+    tf = cfg.get("time_from"); tt = cfg.get("time_to")
+    event_mins = local_dt.hour * 60 + local_dt.minute
+    if tf:
+        f = _parse_hhmm_to_mins(tf)
+        if f is not None and event_mins < f:
+            return False
+    if tt:
+        t = _parse_hhmm_to_mins(tt)
+        if t is not None and event_mins > t:
+            return False
+    return True
+
 
 FEMALE_KEYWORDS = ("lady", "ladies", "girl", "girls", "women", "female",
                    "женский", "женская", "девушк", "женщин")
@@ -450,23 +491,9 @@ def filter_tournaments(tournaments, cfg, loc_dates):
                     continue
             except: pass
 
-        # ★ Time filter — LOCAL time
-        if local_dt and time_from:
-            try:
-                hh, mm = map(int, time_from.split(":"))
-                event_mins = local_dt.hour * 60 + local_dt.minute
-                filter_mins = hh * 60 + mm
-                if event_mins < filter_mins:
-                    continue
-            except: pass
-        if local_dt and time_to:
-            try:
-                hh, mm = map(int, time_to.split(":"))
-                event_mins = local_dt.hour * 60 + local_dt.minute
-                filter_mins = hh * 60 + mm
-                if event_mins > filter_mins:
-                    continue
-            except: pass
+        # Time filter — per-day windows if set, otherwise global time_from/to
+        if not _time_filter_passes(local_dt, cfg):
+            continue
 
         # Level filter — user level must fit in tournament range
         if level_min is not None or level_max is not None:
@@ -521,19 +548,9 @@ def filter_matchi_events(events, cfg, loc_dates):
                     continue
             except: pass
 
-        # Time filter — event START TIME
-        if dt and time_from:
-            try:
-                hh, mm = map(int, time_from.split(":"))
-                if dt.hour * 60 + dt.minute < hh * 60 + mm:
-                    continue
-            except: pass
-        if dt and time_to:
-            try:
-                hh, mm = map(int, time_to.split(":"))
-                if dt.hour * 60 + dt.minute > hh * 60 + mm:
-                    continue
-            except: pass
+        # Time filter — per-day windows if set, otherwise global time_from/to
+        if not _time_filter_passes(dt, cfg):
+            continue
 
         # Min players
         if ev.get("registered_count", 0) < min_pl:
@@ -945,6 +962,19 @@ def summary_text(w):
     dates_str = "; ".join(dates_parts) if dates_parts else "—"
     tf = w.get("time_from") or "Любое"
     tt = w.get("time_to") or "Любое"
+    daily = w.get("daily_windows") or {}
+    if daily:
+        # human summary: "12.05: 18:00-23:00; 13.05: 18:00-23:00; 14.05: 07:00-12:00"
+        parts = []
+        for d in sorted(daily.keys()):
+            try:
+                dt = datetime.strptime(d, "%Y-%m-%d"); ds = dt.strftime("%d.%m")
+            except Exception:
+                ds = d
+            parts.append(f"{ds}: " + ", ".join(daily[d]))
+        time_line = " время по дням: " + "; ".join(parts)
+    else:
+        time_line = f" время начала: {tf} – {tt}"
     lmin = w.get("level_min")
     lmax = w.get("level_max")
     lvl = "Любой" if lmin is None and lmax is None else f"{lmin or '?'} – {lmax or '?'}"
@@ -957,7 +987,7 @@ def summary_text(w):
         f"👥 Мин. игроков (матчи): {w.get('min_players_match', 0)}\n"
         f"👥 Мин. участников (турниры): {w.get('min_players_tourn', 0)}\n"
         f"🎯 Уровень: {lvl}\n"
-        f"🕐 Время начала: {tf} – {tt}\n"
+        f"🕐{time_line}\n"
         f"🔄 Частота: каждые {w.get('frequency', 60)} мин\n"
     )
 
@@ -1101,6 +1131,8 @@ def _main_menu_kb(u, context, uid):
                      InlineKeyboardButton("Остановить", callback_data="stop_monitoring")])
     elif not has_wizard:
         rows.append([InlineKeyboardButton("Настроить постоянный поиск игр", callback_data="wiz_begin")])
+    if has_wizard:
+        rows.append([InlineKeyboardButton("Время по дням (разные окна)", callback_data="daily_menu")])
     rows.append([InlineKeyboardButton("Разовый поиск (по фильтрам, без мониторинга)", callback_data="oneoff_begin")])
     courts_on = bool(context.job_queue.get_jobs_by_name(f"courts_{uid}"))
     rows.append([InlineKeyboardButton(
@@ -2482,6 +2514,191 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(
             "Аккаунт Playtomic отвязан. Пришли ссылку на новый профиль или нажми “В меню”.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return
+
+    # ── Daily time windows ──
+    if data == "daily_menu":
+        w = u.get("wizard") or {}
+        daily = w.get("daily_windows") or {}
+        if not daily:
+            text = ("🕐 <b>Разные окна времени по дням</b>\n\n"
+                    "Сейчас не настроены. Используется глобальный фильтр времени из визарда.\n\n"
+                    "Добавь дни с окнами — например «12.05 вечер», «14.05 утро». Если хотя бы один день задан, "
+                    "в выдачу попадут только эти дни и только в указанные окна.")
+        else:
+            lines = ["🕐 <b>Разные окна времени по дням</b>\n"]
+            for d in sorted(daily.keys()):
+                try:
+                    dt = datetime.strptime(d, "%Y-%m-%d")
+                    ds = dt.strftime("%a %d.%m")
+                except Exception:
+                    ds = d
+                lines.append(f"• <b>{ds}</b>: " + ", ".join(daily[d]))
+            lines.append("\nДобавь или измени дни ниже.")
+            text = "\n".join(lines)
+        rows = [[InlineKeyboardButton("+ Добавить день", callback_data="daily_add")]]
+        if daily:
+            rows.append([InlineKeyboardButton("Очистить все дни", callback_data="daily_clear_all")])
+        rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
+        await q.edit_message_text(text, parse_mode="HTML",
+                                  reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data == "daily_clear_all":
+        w = u.setdefault("wizard", {}) or u["wizard"]
+        w["daily_windows"] = {}
+        set_user(uid, u)
+        await q.answer("Очищено")
+        # Re-show menu
+        u = get_user(uid)
+        await context.bot.send_message(q.message.chat_id, "Готово — все дни удалены. Нажми 'Время по дням'.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return
+
+    if data == "daily_add":
+        # Show next 14 days; mark days that already have windows
+        w = u.get("wizard") or {}
+        daily = w.get("daily_windows") or {}
+        today = datetime.utcnow().date()
+        rows = []
+        DAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        for off in range(0, 14):
+            d = today + timedelta(days=off)
+            key = d.isoformat()
+            mark = " ✅" if key in daily and daily[key] else ""
+            label = f"{DAY_RU[d.weekday()]} {d.strftime('%d.%m')}{mark}"
+            rows.append([InlineKeyboardButton(label, callback_data=f"daily_d_{key}")])
+            if len(rows) >= 14: break
+        # group into pairs of 2 for compactness
+        grouped = []
+        for i in range(0, len(rows), 2):
+            grouped.append(rows[i] + (rows[i+1] if i+1 < len(rows) else []))
+        grouped.append([InlineKeyboardButton("← Назад", callback_data="daily_menu")])
+        await q.edit_message_text("Выбери день, который настроить:",
+                                  reply_markup=InlineKeyboardMarkup(grouped))
+        return
+
+    if data and data.startswith("daily_d_"):
+        date_key = data[len("daily_d_"):]
+        w = u.get("wizard") or {}
+        daily = w.get("daily_windows") or {}
+        cur = daily.get(date_key, [])
+        try:
+            dt = datetime.strptime(date_key, "%Y-%m-%d"); ds = dt.strftime("%a %d.%m")
+        except Exception:
+            ds = date_key
+        text = f"<b>{ds}</b>\n"
+        text += "Текущие окна: " + (", ".join(cur) if cur else "нет")
+        text += "\n\nВыбери окно для добавления:"
+        presets = [
+            ("Утро (07–12)", "07:00-12:00"),
+            ("День (12–17)", "12:00-17:00"),
+            ("Вечер (17–23)", "17:00-23:00"),
+            ("Поздний вечер (19–23)", "19:00-23:00"),
+            ("Весь день (07–23)", "07:00-23:00"),
+        ]
+        rows = []
+        for label, win in presets:
+            mark = " ✅" if win in cur else ""
+            rows.append([InlineKeyboardButton(label + mark,
+                callback_data=f"daily_w_{date_key}_{win.replace(':','').replace('-','_')}")])
+        if cur:
+            rows.append([InlineKeyboardButton("Очистить этот день", callback_data=f"daily_clr_{date_key}")])
+        rows.append([InlineKeyboardButton("← Выбрать другой день", callback_data="daily_add")])
+        rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
+        await q.edit_message_text(text, parse_mode="HTML",
+                                  reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data and data.startswith("daily_w_"):
+        # daily_w_<YYYY-MM-DD>_<HHMM_HHMM>
+        rest = data[len("daily_w_"):]
+        parts = rest.rsplit("_", 2)
+        if len(parts) == 3:
+            date_key = parts[0]
+            hhmm_from = parts[1]
+            hhmm_to = parts[2]
+            window = f"{hhmm_from[:2]}:{hhmm_from[2:]}-{hhmm_to[:2]}:{hhmm_to[2:]}"
+            w = u.setdefault("wizard", {}) or u["wizard"]
+            daily = w.setdefault("daily_windows", {})
+            cur = daily.get(date_key, [])
+            if window in cur:
+                cur.remove(window)
+                msg = f"Убрано: {window}"
+            else:
+                cur.append(window); cur.sort()
+                msg = f"Добавлено: {window}"
+            if cur:
+                daily[date_key] = cur
+            else:
+                daily.pop(date_key, None)
+            set_user(uid, u)
+            await q.answer(msg)
+            # Re-render the day editor
+            context.user_data["_simulate_data"] = f"daily_d_{date_key}"
+        # Re-trigger by calling the same handler logic recursively via send
+        # Simpler: rebuild day editor inline
+        u = get_user(uid)
+        w = u.get("wizard") or {}
+        daily = w.get("daily_windows") or {}
+        try:
+            date_key
+        except NameError:
+            date_key = ""
+        cur = daily.get(date_key, [])
+        try:
+            dt = datetime.strptime(date_key, "%Y-%m-%d"); ds = dt.strftime("%a %d.%m")
+        except Exception:
+            ds = date_key
+        text = f"<b>{ds}</b>\nТекущие окна: " + (", ".join(cur) if cur else "нет")
+        text += "\n\nВыбери окно:"
+        presets = [
+            ("Утро (07–12)", "07:00-12:00"),
+            ("День (12–17)", "12:00-17:00"),
+            ("Вечер (17–23)", "17:00-23:00"),
+            ("Поздний вечер (19–23)", "19:00-23:00"),
+            ("Весь день (07–23)", "07:00-23:00"),
+        ]
+        rows = []
+        for label, win in presets:
+            mark = " ✅" if win in cur else ""
+            rows.append([InlineKeyboardButton(label + mark,
+                callback_data=f"daily_w_{date_key}_{win.replace(':','').replace('-','_')}")])
+        if cur:
+            rows.append([InlineKeyboardButton("Очистить этот день", callback_data=f"daily_clr_{date_key}")])
+        rows.append([InlineKeyboardButton("← Выбрать другой день", callback_data="daily_add")])
+        rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
+        await q.edit_message_text(text, parse_mode="HTML",
+                                  reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data and data.startswith("daily_clr_"):
+        date_key = data[len("daily_clr_"):]
+        w = u.setdefault("wizard", {}) or u["wizard"]
+        daily = w.setdefault("daily_windows", {})
+        daily.pop(date_key, None)
+        set_user(uid, u)
+        await q.answer("Очищен день")
+        # Back to overview
+        u = get_user(uid)
+        daily = (u.get("wizard") or {}).get("daily_windows") or {}
+        if not daily:
+            text = "Все дни очищены. Поиск будет использовать глобальный фильтр времени."
+        else:
+            lines = ["🕐 <b>Окна по дням</b>\n"]
+            for d in sorted(daily.keys()):
+                try:
+                    dt = datetime.strptime(d, "%Y-%m-%d"); ds = dt.strftime("%a %d.%m")
+                except Exception:
+                    ds = d
+                lines.append(f"• <b>{ds}</b>: " + ", ".join(daily[d]))
+            text = "\n".join(lines)
+        rows = [[InlineKeyboardButton("+ Добавить день", callback_data="daily_add")]]
+        if daily:
+            rows.append([InlineKeyboardButton("Очистить все дни", callback_data="daily_clear_all")])
+        rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
+        await q.edit_message_text(text, parse_mode="HTML",
+                                  reply_markup=InlineKeyboardMarkup(rows))
         return
 
     # ── Back to main menu ──
