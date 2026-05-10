@@ -2359,6 +2359,44 @@ NEED_LINK_TEXT = (
     "<code>https://app.playtomic.io/profile/user/9436699</code>"
 )
 
+_DAILY_PRESETS = [
+    ("Утро (07–12)",          "07:00-12:00"),
+    ("День (12–17)",          "12:00-17:00"),
+    ("Вечер (17–23)",        "17:00-23:00"),
+    ("Поздний вечер (19–23)", "19:00-23:00"),
+    ("Весь день (07–23)",   "07:00-23:00"),
+]
+
+
+async def _render_day_editor(target, u, date_key, msg=""):
+    """Render the per-day window editor for a single date."""
+    w = u.get("wizard") or {}
+    daily = w.get("daily_windows") or {}
+    cur = daily.get(date_key, [])
+    try:
+        dt = datetime.strptime(date_key, "%Y-%m-%d")
+        DAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        ds = f"{DAY_RU[dt.weekday()]} {dt.strftime('%d.%m')}"
+    except Exception:
+        ds = date_key
+    text = (msg + "\n\n") if msg else ""
+    text += f"<b>{ds}</b>\nАктивные окна: " + (", ".join(cur) if cur else "нет")
+    text += "\n\nНажми пресет — добавит окно. Чтобы убрать — кнопка ❌ ниже."
+    rows = []
+    for label, win in _DAILY_PRESETS:
+        mark = " ✅" if win in cur else ""
+        rows.append([InlineKeyboardButton(label + mark,
+            callback_data=f"daily_add_{date_key}_{win.replace(':','').replace('-','_')}")])
+    for win in cur:
+        rows.append([InlineKeyboardButton(f"❌ Убрать {win}",
+            callback_data=f"daily_rm_{date_key}_{win.replace(':','').replace('-','_')}")])
+    rows.append([InlineKeyboardButton("← Выбрать другой день", callback_data="daily_add")])
+    rows.append([InlineKeyboardButton("← Обзор всех дней", callback_data="daily_menu")])
+    rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
+    await target.edit_message_text(text, parse_mode="HTML",
+                                   reply_markup=InlineKeyboardMarkup(rows))
+
+
 async def _need_link(target):
     """Reply asking the user to share their Playtomic profile link."""
     if hasattr(target, "edit_message_text"):
@@ -2536,10 +2574,47 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"• <b>{ds}</b>: " + ", ".join(daily[d]))
             lines.append("\nДобавь или измени дни ниже.")
             text = "\n".join(lines)
-        rows = [[InlineKeyboardButton("+ Добавить день", callback_data="daily_add")]]
+        rows = [[InlineKeyboardButton("+ Добавить день", callback_data="daily_add")],
+                [InlineKeyboardButton("Быстро: вечер на ближайшие 3 дня", callback_data="daily_quick_evening3")]]
         if daily:
             rows.append([InlineKeyboardButton("Очистить все дни", callback_data="daily_clear_all")])
         rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
+        await q.edit_message_text(text, parse_mode="HTML",
+                                  reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data == "daily_quick_evening3":
+        # Add "17:00-23:00" to the next 3 days (today+1..+3)
+        w = u.setdefault("wizard", {}) or u["wizard"]
+        daily = w.setdefault("daily_windows", {})
+        today = datetime.utcnow().date()
+        added = []
+        for off in range(1, 4):
+            d = (today + timedelta(days=off)).isoformat()
+            cur = daily.get(d, [])
+            if "17:00-23:00" not in cur:
+                cur.append("17:00-23:00"); cur.sort()
+                daily[d] = cur
+                added.append(d)
+        set_user(uid, u)
+        await q.answer(f"Включено {len(added)} дн.", show_alert=False)
+        # Re-render overview
+        context_data = "daily_menu"
+        # Fall-through: re-invoke menu
+        u = get_user(uid)
+        daily = (u.get("wizard") or {}).get("daily_windows") or {}
+        lines = ["🕐 <b>Разные окна времени по дням</b>\n"]
+        for d in sorted(daily.keys()):
+            try:
+                dt = datetime.strptime(d, "%Y-%m-%d"); ds = dt.strftime("%a %d.%m")
+            except Exception:
+                ds = d
+            lines.append(f"• <b>{ds}</b>: " + ", ".join(daily[d]))
+        text = "\n".join(lines)
+        rows = [[InlineKeyboardButton("+ Добавить день", callback_data="daily_add")],
+                [InlineKeyboardButton("Быстро: вечер на ближайшие 3 дня", callback_data="daily_quick_evening3")],
+                [InlineKeyboardButton("Очистить все дни", callback_data="daily_clear_all")],
+                [InlineKeyboardButton("← В меню", callback_data="back_main")]]
         await q.edit_message_text(text, parse_mode="HTML",
                                   reply_markup=InlineKeyboardMarkup(rows))
         return
@@ -2580,91 +2655,40 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data and data.startswith("daily_d_"):
         date_key = data[len("daily_d_"):]
-        w = u.get("wizard") or {}
-        daily = w.get("daily_windows") or {}
-        cur = daily.get(date_key, [])
-        try:
-            dt = datetime.strptime(date_key, "%Y-%m-%d"); ds = dt.strftime("%a %d.%m")
-        except Exception:
-            ds = date_key
-        text = f"<b>{ds}</b>\n"
-        text += "Текущие окна: " + (", ".join(cur) if cur else "нет")
-        text += "\n\nВыбери окно для добавления:"
-        presets = [
-            ("Утро (07–12)", "07:00-12:00"),
-            ("День (12–17)", "12:00-17:00"),
-            ("Вечер (17–23)", "17:00-23:00"),
-            ("Поздний вечер (19–23)", "19:00-23:00"),
-            ("Весь день (07–23)", "07:00-23:00"),
-        ]
-        rows = []
-        for label, win in presets:
-            mark = " ✅" if win in cur else ""
-            rows.append([InlineKeyboardButton(label + mark,
-                callback_data=f"daily_w_{date_key}_{win.replace(':','').replace('-','_')}")])
-        if cur:
-            rows.append([InlineKeyboardButton("Очистить этот день", callback_data=f"daily_clr_{date_key}")])
-        rows.append([InlineKeyboardButton("← Выбрать другой день", callback_data="daily_add")])
-        rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
-        await q.edit_message_text(text, parse_mode="HTML",
-                                  reply_markup=InlineKeyboardMarkup(rows))
+        await _render_day_editor(q, u, date_key, msg="")
         return
 
-    if data and data.startswith("daily_w_"):
-        # daily_w_<YYYY-MM-DD>_<HHMM_HHMM>
-        rest = data[len("daily_w_"):]
+    if data and (data.startswith("daily_add_20") or data.startswith("daily_rm_")):
+        is_add = data.startswith("daily_add_")
+        rest = data[len("daily_add_") if is_add else len("daily_rm_"):]
         parts = rest.rsplit("_", 2)
-        date_key = ""
-        confirm = ""
-        if len(parts) == 3:
-            date_key = parts[0]
-            hhmm_from = parts[1]
-            hhmm_to = parts[2]
-            window = f"{hhmm_from[:2]}:{hhmm_from[2:]}-{hhmm_to[:2]}:{hhmm_to[2:]}"
-            w = u.setdefault("wizard", {}) or u["wizard"]
-            daily = w.setdefault("daily_windows", {})
-            cur = daily.get(date_key, [])
+        if len(parts) != 3:
+            await q.answer("Ошибка", show_alert=False)
+            return
+        date_key, hhmm_from, hhmm_to = parts
+        window = f"{hhmm_from[:2]}:{hhmm_from[2:]}-{hhmm_to[:2]}:{hhmm_to[2:]}"
+        w = u.setdefault("wizard", {}) or u["wizard"]
+        daily = w.setdefault("daily_windows", {})
+        cur = daily.get(date_key, [])
+        if is_add:
             if window in cur:
-                cur.remove(window)
-                confirm = f"❌ Убрано: {window}"
+                msg = f"Уже добавлено: {window}"
             else:
                 cur.append(window); cur.sort()
-                confirm = f"✅ Добавлено: {window} — будет мониториться"
-            if cur:
-                daily[date_key] = cur
+                msg = f"✅ Добавлено {window} — включено в мониторинг"
+        else:
+            if window in cur:
+                cur.remove(window)
+                msg = f"❌ Убрано {window}"
             else:
-                daily.pop(date_key, None)
-            set_user(uid, u)
-            await q.answer(confirm.split(" — ")[0], show_alert=False)
-        u = get_user(uid)
-        w = u.get("wizard") or {}
-        daily = w.get("daily_windows") or {}
-        cur = daily.get(date_key, [])
-        try:
-            dt = datetime.strptime(date_key, "%Y-%m-%d"); ds = dt.strftime("%a %d.%m")
-        except Exception:
-            ds = date_key
-        text = (confirm + "\n\n" if confirm else "")
-        text += f"<b>{ds}</b>\nТекущие окна: " + (", ".join(cur) if cur else "нет")
-        text += "\n\nВыбери окно:"
-        presets = [
-            ("Утро (07–12)", "07:00-12:00"),
-            ("День (12–17)", "12:00-17:00"),
-            ("Вечер (17–23)", "17:00-23:00"),
-            ("Поздний вечер (19–23)", "19:00-23:00"),
-            ("Весь день (07–23)", "07:00-23:00"),
-        ]
-        rows = []
-        for label, win in presets:
-            mark = " ✅" if win in cur else ""
-            rows.append([InlineKeyboardButton(label + mark,
-                callback_data=f"daily_w_{date_key}_{win.replace(':','').replace('-','_')}")])
+                msg = f"Окно не было активно"
         if cur:
-            rows.append([InlineKeyboardButton("Очистить этот день", callback_data=f"daily_clr_{date_key}")])
-        rows.append([InlineKeyboardButton("← Выбрать другой день", callback_data="daily_add")])
-        rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
-        await q.edit_message_text(text, parse_mode="HTML",
-                                  reply_markup=InlineKeyboardMarkup(rows))
+            daily[date_key] = cur
+        else:
+            daily.pop(date_key, None)
+        set_user(uid, u)
+        await q.answer(msg.split(" — ")[0], show_alert=False)
+        await _render_day_editor(q, get_user(uid), date_key, msg=msg)
         return
 
     if data and data.startswith("daily_clr_"):
