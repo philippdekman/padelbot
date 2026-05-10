@@ -331,9 +331,10 @@ def filter_matches(matches, cfg, loc_dates):
         if m.get("status") in ("CANCELED", "FINISHED", "CONFIRMED"):
             continue
 
-        # Skip private matches (link-only, not searchable on Playtomic).
-        # All public matches have visibility=VISIBLE — include everything visible.
-        if m.get("visibility") and m.get("visibility") != "VISIBLE":
+        # Skip private matches unless include_private is enabled (per wizard).
+        # Some areas (e.g. Aphrodite Hills) have ONLY HIDDEN matches in API.
+        include_private = bool(cfg.get("include_private"))
+        if not include_private and m.get("visibility") and m.get("visibility") != "VISIBLE":
             continue
         # Пропускаем женские матчи по названию/описанию/локации
         if (_is_female_only(m.get("name", "")) or _is_female_only(m.get("description", ""))
@@ -992,6 +993,7 @@ def summary_text(w):
         f"👥 Мин. участников (турниры): {w.get('min_players_tourn', 0)}\n"
         f"🎯 Уровень: {lvl}\n"
         f"🕐{time_line}\n"
+        f"🔐 Приватные игры: {'вкл' if w.get('include_private') else 'выкл'}\n"
         f"🔄 Частота: каждые {w.get('frequency', 60)} мин\n"
     )
 
@@ -3568,6 +3570,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             w["locations"] = ["Limassol", "Aphrodite"]
         else:
             w["locations"] = [choice]
+        # Auto-enable private matches if Aphrodite is included — the area has
+        # only HIDDEN matches in Playtomic's public API, so otherwise nothing
+        # would ever surface.
+        if "Aphrodite" in w["locations"]:
+            w["include_private"] = True
         w["step"] = "radius"
         set_user(uid, u)
         await show_step(q, uid, context)
