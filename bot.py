@@ -316,8 +316,16 @@ def _to_local(dt, loc_name):
 
 def filter_matches(matches, cfg, loc_dates):
     result = []
-    date_from = loc_dates.get("from")
-    date_to = loc_dates.get("to")
+    # If daily_windows are set, derive the date range from them.
+    # This overrides loc_dates so that adding a day to daily_windows
+    # automatically extends the search range.
+    daily = cfg.get("daily_windows") or {}
+    if daily:
+        keys = sorted(daily.keys())
+        date_from, date_to = keys[0], keys[-1]
+    else:
+        date_from = loc_dates.get("from")
+        date_to = loc_dates.get("to")
     time_from = cfg.get("time_from")
     time_to = cfg.get("time_to")
     level_min = cfg.get("level_min")
@@ -460,8 +468,13 @@ def _is_female_only(text: str) -> bool:
 
 def filter_tournaments(tournaments, cfg, loc_dates):
     result = []
-    date_from = loc_dates.get("from")
-    date_to = loc_dates.get("to")
+    daily = cfg.get("daily_windows") or {}
+    if daily:
+        keys = sorted(daily.keys())
+        date_from, date_to = keys[0], keys[-1]
+    else:
+        date_from = loc_dates.get("from")
+        date_to = loc_dates.get("to")
     time_from = cfg.get("time_from")
     time_to = cfg.get("time_to")
     level_min = cfg.get("level_min")
@@ -2606,7 +2619,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"• Радиус: {w.get('radius', 10)} км")
             lines.append(f"• Уровень: {lvl}")
             if daily:
-                lines.append("• Окна по дням:")
+                lines.append("• Окна по дням (переопределяют основные даты):")
                 for d in sorted(daily.keys()):
                     try:
                         dt = datetime.strptime(d, "%Y-%m-%d")
