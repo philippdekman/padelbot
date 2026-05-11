@@ -1139,6 +1139,7 @@ def _main_menu_kb(u, context, uid):
         rows.append([InlineKeyboardButton("Настроить постоянный поиск игр", callback_data="wiz_begin")])
     if has_wizard:
         rows.append([InlineKeyboardButton("Время по дням (разные окна)", callback_data="daily_menu")])
+    rows.append([InlineKeyboardButton("Статус мониторинга", callback_data="status_check")])
     rows.append([InlineKeyboardButton("Разовый поиск (по фильтрам, без мониторинга)", callback_data="oneoff_begin")])
     courts_on = bool(context.job_queue.get_jobs_by_name(f"courts_{uid}"))
     rows.append([InlineKeyboardButton(
@@ -2558,6 +2559,74 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(
             "Аккаунт Playtomic отвязан. Пришли ссылку на новый профиль или нажми “В меню”.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return
+
+    # ── Monitoring status ──
+    if data == "status_check":
+        jq = context.job_queue
+        def jobs(name):
+            return jq.get_jobs_by_name(name)
+        search_jobs = jobs(f"watch_tick_{uid}")
+        my_jobs = jobs(f"my_watch_{uid}")
+        score_jobs = jobs(f"score_watch_{uid}")
+        courts_jobs = jobs(f"courts_{uid}")
+        rating_jobs = jobs(f"rating_{uid}")
+
+        def fmt(label, j, freq_hint=""):
+            if not j:
+                return f"⚪️ <b>{label}</b> — выключен"
+            try:
+                nxt = j[0].next_t
+                if nxt:
+                    delta = (nxt - datetime.now(timezone.utc)).total_seconds()
+                    nxt_s = f"через {int(max(0,delta)/60)} мин"
+                else:
+                    nxt_s = "в очереди"
+            except Exception:
+                nxt_s = ""
+            return f"🟢 <b>{label}</b> — вкл{freq_hint} · {nxt_s}"
+
+        w = u.get("wizard") or {}
+        freq = w.get("frequency", 60)
+        lines = ["<b>📊 Статус мониторинга</b>\n"]
+        lines.append(fmt("Поиск новых матчей", search_jobs, f" (каждые {freq} мин)"))
+        lines.append(fmt("Мои матчи (изменения)", my_jobs, " (каждые 3 мин)"))
+        lines.append(fmt("Картинки счёта", score_jobs, " (каждые 10 мин)"))
+        lines.append(fmt("Свободные корты", courts_jobs, " (каждые 10 мин)"))
+        lines.append(fmt("Рейтинг", rating_jobs, " (каждые 3 ч)"))
+
+        # Active filters summary
+        if has_wizard := bool(w.get("locations")):
+            locs = ", ".join(w.get("locations", []))
+            lvl = (f"{w.get('level_min','?')}–{w.get('level_max','?')}"
+                   if w.get("level_min") or w.get("level_max") else "Любой")
+            daily = w.get("daily_windows") or {}
+            lines.append("\n<b>Фильтры:</b>")
+            lines.append(f"• Локации: {locs}")
+            lines.append(f"• Радиус: {w.get('radius', 10)} км")
+            lines.append(f"• Уровень: {lvl}")
+            if daily:
+                lines.append("• Окна по дням:")
+                for d in sorted(daily.keys()):
+                    try:
+                        dt = datetime.strptime(d, "%Y-%m-%d")
+                        ds = dt.strftime("%a %d.%m")
+                    except Exception:
+                        ds = d
+                    lines.append(f"   {ds}: " + ", ".join(daily[d]))
+            else:
+                tf = w.get("time_from") or "Любое"
+                tt = w.get("time_to") or "Любое"
+                lines.append(f"• Время: {tf} – {tt} (все дни)")
+            lines.append(f"• Приватные игры: {'вкл' if w.get('include_private') else 'выкл'}")
+
+        text = "\n".join(lines)
+        rows = []
+        if not search_jobs and w.get("locations"):
+            rows.append([InlineKeyboardButton("▶️ Запустить поиск матчей", callback_data="wiz_save")])
+        rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
+        await q.edit_message_text(text, parse_mode="HTML",
+                                  reply_markup=InlineKeyboardMarkup(rows))
         return
 
     # ── Daily time windows ──
