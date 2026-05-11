@@ -412,33 +412,43 @@ def _parse_hhmm_to_mins(s: str):
         return None
 
 
+def _window_match(event_mins, windows):
+    for w in windows or []:
+        try:
+            fr, to = w.split("-", 1)
+            f = _parse_hhmm_to_mins(fr.strip())
+            t = _parse_hhmm_to_mins(to.strip())
+            if f is None or t is None: continue
+            if f <= event_mins <= t:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _time_filter_passes(local_dt, cfg):
     """True if the event's local time passes the configured time filter.
 
-    Combined semantics (both date sources are valid):
-      - If the event's date is listed in daily_windows → must fit one of its windows.
+    Rules:
+      - daily_exclude on the event's date → if event time falls in an excluded
+        window, REJECT (overrides everything else).
+      - daily_windows on the event's date → must fit one of those windows.
       - Otherwise → falls back to the global time_from/time_to window.
-        (The global window still applies on days NOT listed in daily_windows,
-         so a day inside the wizard date range works with the default hours.)
     """
     if not local_dt:
         return True
-    daily = cfg.get("daily_windows") or {}
     event_mins = local_dt.hour * 60 + local_dt.minute
     day_key = local_dt.date().isoformat()
+    excludes = (cfg.get("daily_exclude") or {}).get(day_key)
+    if excludes is not None:
+        # Empty list means "exclude the entire day"
+        if not excludes:
+            return False
+        if _window_match(event_mins, excludes):
+            return False
+    daily = cfg.get("daily_windows") or {}
     if day_key in daily:
-        for w in daily[day_key]:
-            try:
-                fr, to = w.split("-", 1)
-                f = _parse_hhmm_to_mins(fr.strip())
-                t = _parse_hhmm_to_mins(to.strip())
-                if f is None or t is None:
-                    continue
-                if f <= event_mins <= t:
-                    return True
-            except Exception:
-                continue
-        return False
+        return _window_match(event_mins, daily[day_key])
     # Day not in daily_windows → global window from wizard.
     tf = cfg.get("time_from"); tt = cfg.get("time_to")
     if tf:
@@ -877,8 +887,8 @@ def wiz(uid):
             "level_min": None,
             "level_max": None,
             "level_phase": "min",
-            "time_from": None,
-            "time_to": None,
+            "time_from": "09:00",
+            "time_to": "22:00",
             "time_from_h": 9, "time_from_m": 0,
             "time_to_h": 22, "time_to_m": 0,
             "frequency": 60,
@@ -2420,11 +2430,16 @@ _DAILY_PRESETS = [
 ]
 
 
-async def _render_day_editor(target, u, date_key, msg=""):
-    """Render the per-day window editor for a single date."""
+async def _render_day_editor(target, u, date_key, msg="", mode="include"):
+    """Render the per-day window editor for a single date.
+
+    mode: 'include' (add/remove allowed windows) or 'exclude' (add/remove excluded windows).
+    """
     w = u.get("wizard") or {}
     daily = w.get("daily_windows") or {}
-    cur = daily.get(date_key, [])
+    excl = w.get("daily_exclude") or {}
+    inc_cur = daily.get(date_key, [])
+    exc_cur = excl.get(date_key, [])
     try:
         dt = datetime.strptime(date_key, "%Y-%m-%d")
         DAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
@@ -2432,18 +2447,38 @@ async def _render_day_editor(target, u, date_key, msg=""):
     except Exception:
         ds = date_key
     text = (msg + "\n\n") if msg else ""
-    text += f"<b>{ds}</b>\nАктивные окна: " + (", ".join(cur) if cur else "нет")
-    text += "\n\nНажми пресет — добавит окно. Чтобы убрать — кнопка ❌ ниже."
+    text += f"<b>{ds}</b>\n"
+    text += "Включено: " + (", ".join(inc_cur) if inc_cur else "нет") + "\n"
+    text += "Исключено: " + (", ".join(exc_cur) if exc_cur else "нет")
+    if mode == "exclude":
+        text += "\n\n🚫 <b>Режим: Исключение</b> — нажми пресет, чтобы выкинуть это окно из мониторинга."
+    else:
+        text += "\n\n✅ <b>Режим: Добавление</b> — нажми пресет, чтобы разрешить это окно."
+
+    # Mode toggle
     rows = []
+    if mode == "exclude":
+        rows.append([InlineKeyboardButton("✅ Переключиться на добавление",
+                                         callback_data=f"daily_d_{date_key}")])
+    else:
+        rows.append([InlineKeyboardButton("🚫 Переключиться на исключение",
+                                         callback_data=f"daily_x_{date_key}")])
+
+    cur = exc_cur if mode == "exclude" else inc_cur
+    action_prefix = "xadd" if mode == "exclude" else "add"
+    rm_prefix = "xrm" if mode == "exclude" else "rm"
     for label, win in _DAILY_PRESETS:
         mark = " ✅" if win in cur else ""
         rows.append([InlineKeyboardButton(label + mark,
-            callback_data=f"daily_add_{date_key}_{win.replace(':','').replace('-','_')}")])
+            callback_data=f"daily_{action_prefix}_{date_key}_{win.replace(':','').replace('-','_')}")])
     for win in cur:
         rows.append([InlineKeyboardButton(f"❌ Убрать {win}",
-            callback_data=f"daily_rm_{date_key}_{win.replace(':','').replace('-','_')}")])
+            callback_data=f"daily_{rm_prefix}_{date_key}_{win.replace(':','').replace('-','_')}")])
     rows.append([InlineKeyboardButton("🕰 Кастомное время (ввести вручную)",
-                                 callback_data=f"daily_custom_{date_key}")])
+                                 callback_data=f"daily_custom_{date_key}_{mode}")])
+    if mode == "exclude":
+        rows.append([InlineKeyboardButton("🚫 Исключить весь день",
+                                         callback_data=f"daily_xall_{date_key}")])
     rows.append([InlineKeyboardButton("← Выбрать другой день", callback_data="daily_add")])
     rows.append([InlineKeyboardButton("← Обзор всех дней", callback_data="daily_menu")])
     rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
@@ -2518,12 +2553,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         window = f"{h1:02d}:{m1:02d}-{h2:02d}:{m2:02d}"
         w_cfg = u.setdefault("wizard", {}) or u["wizard"]
-        daily = w_cfg.setdefault("daily_windows", {})
-        cur = daily.get(awaiting_date, [])
+        mode = u.get("awaiting_custom_mode") or "include"
+        store_key = "daily_exclude" if mode == "exclude" else "daily_windows"
+        store = w_cfg.setdefault(store_key, {})
+        cur = store.get(awaiting_date, [])
         if window not in cur:
             cur.append(window); cur.sort()
-            daily[awaiting_date] = cur
+            store[awaiting_date] = cur
         u["awaiting_custom_window_for"] = None
+        u["awaiting_custom_mode"] = None
         set_user(uid, u)
         try:
             dt = datetime.strptime(awaiting_date, "%Y-%m-%d")
@@ -2531,10 +2569,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ds = f"{DAY_RU[dt.weekday()]} {dt.strftime('%d.%m')}"
         except Exception:
             ds = awaiting_date
+        back_cb = f"daily_{'x_' if mode == 'exclude' else 'd_'}{awaiting_date}"
+        verb = "🚫 Исключено" if mode == "exclude" else "✅ Добавлено"
         await update.message.reply_text(
-            f"✅ Добавлено {window} в {ds}",
+            f"{verb} {window} в {ds}",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"← К {ds}", callback_data=f"daily_d_{awaiting_date}")],
+                [InlineKeyboardButton(f"← К {ds}", callback_data=back_cb)],
                 [InlineKeyboardButton("← В меню", callback_data="back_main")]]))
         return
 
@@ -2724,34 +2764,39 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "daily_menu":
         w = u.get("wizard") or {}
         daily = w.get("daily_windows") or {}
+        excl = w.get("daily_exclude") or {}
         DAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-        if not daily:
+        all_dates = sorted(set(list(daily.keys()) + list(excl.keys())))
+        rows = []
+        if not all_dates:
             text = ("🕐 <b>Окна времени по дням</b>\n\n"
                     "Сейчас не настроены. Используется глобальный фильтр времени из визарда.\n\n"
-                    "Нажми «+ Добавить день» или «Быстро: вечер на ближайшие 3 дня».")
-            rows = [[InlineKeyboardButton("+ Добавить день", callback_data="daily_add")],
-                    [InlineKeyboardButton("Быстро: вечер на 3 дня", callback_data="daily_quick_evening3")],
-                    [InlineKeyboardButton("← В меню", callback_data="back_main")]]
+                    "Добавь дни с окнами (разрешить поиск) или исключи дни/окна (выкинуть из поиска).")
         else:
-            lines = ["🕐 <b>Активные окна по дням</b>\n"]
-            rows = []
-            for d in sorted(daily.keys()):
+            lines = ["🕐 <b>Окна по дням</b>\n"]
+            for d in all_dates:
                 try:
                     dt = datetime.strptime(d, "%Y-%m-%d")
                     ds = f"{DAY_RU[dt.weekday()]} {dt.strftime('%d.%m')}"
                 except Exception:
                     ds = d
-                lines.append(f"• <b>{ds}</b>: " + ", ".join(daily[d]))
-                # Per-day edit & quick delete buttons
+                inc_w = daily.get(d, [])
+                exc_w = excl.get(d)
+                parts = []
+                if inc_w: parts.append("✅ " + ", ".join(inc_w))
+                if exc_w is not None:
+                    parts.append("🚫 " + (", ".join(exc_w) if exc_w else "весь день"))
+                lines.append(f"• <b>{ds}</b>: " + " | ".join(parts))
                 rows.append([
                     InlineKeyboardButton(f"✏️ {ds}", callback_data=f"daily_d_{d}"),
                     InlineKeyboardButton("❌ Убрать", callback_data=f"daily_clr_{d}"),
                 ])
             text = "\n".join(lines)
-            rows.append([InlineKeyboardButton("+ Добавить ещё день", callback_data="daily_add")])
-            rows.append([InlineKeyboardButton("Быстро: вечер на 3 дня", callback_data="daily_quick_evening3")])
-            rows.append([InlineKeyboardButton("🗑 Сбросить все дни", callback_data="daily_clear_all")])
-            rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
+        rows.append([InlineKeyboardButton("+ Добавить день", callback_data="daily_add")])
+        rows.append([InlineKeyboardButton("Быстро: вечер на 3 дня", callback_data="daily_quick_evening3")])
+        if all_dates:
+            rows.append([InlineKeyboardButton("🗑 Сбросить всё", callback_data="daily_clear_all")])
+        rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
         await q.edit_message_text(text, parse_mode="HTML",
                                   reply_markup=InlineKeyboardMarkup(rows))
         return
@@ -2795,6 +2840,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "daily_clear_all":
         w = u.setdefault("wizard", {}) or u["wizard"]
         w["daily_windows"] = {}
+        w["daily_exclude"] = {}
         set_user(uid, u)
         await q.answer("Все дни удалены", show_alert=False)
         # Show fresh empty state of the same screen
@@ -2833,12 +2879,36 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data and data.startswith("daily_d_"):
         date_key = data[len("daily_d_"):]
-        await _render_day_editor(q, u, date_key, msg="")
+        await _render_day_editor(q, u, date_key, msg="", mode="include")
+        return
+
+    # NOTE: must come AFTER daily_xall_/daily_xadd_/daily_xrm_ checks below
+    if data and data.startswith("daily_x_20"):
+        date_key = data[len("daily_x_"):]
+        await _render_day_editor(q, u, date_key, msg="", mode="exclude")
+        return
+
+    if data and data.startswith("daily_xall_"):
+        date_key = data[len("daily_xall_"):]
+        w_cfg = u.setdefault("wizard", {}) or u["wizard"]
+        excl = w_cfg.setdefault("daily_exclude", {})
+        excl[date_key] = []  # empty list = exclude whole day
+        set_user(uid, u)
+        await q.answer("День исключён целиком", show_alert=False)
+        await _render_day_editor(q, get_user(uid), date_key, msg="🚫 День исключён целиком", mode="exclude")
         return
 
     if data and data.startswith("daily_custom_"):
-        date_key = data[len("daily_custom_"):]
+        rest = data[len("daily_custom_"):]
+        # Format: <date>_<mode> or just <date> (legacy)
+        if rest.endswith("_exclude"):
+            date_key = rest[:-len("_exclude")]; mode = "exclude"
+        elif rest.endswith("_include"):
+            date_key = rest[:-len("_include")]; mode = "include"
+        else:
+            date_key = rest; mode = "include"
         u["awaiting_custom_window_for"] = date_key
+        u["awaiting_custom_mode"] = mode
         set_user(uid, u)
         try:
             dt = datetime.strptime(date_key, "%Y-%m-%d")
@@ -2846,16 +2916,29 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ds = f"{DAY_RU[dt.weekday()]} {dt.strftime('%d.%m')}"
         except Exception:
             ds = date_key
+        verb = "исключить" if mode == "exclude" else "разрешить"
         await q.edit_message_text(
-            f"🕰 <b>{ds}</b>\n\nНапиши окно в формате <code>HH:MM-HH:MM</code>\nПример: <code>08:30-12:30</code>",
+            f"🕰 <b>{ds}</b>\n\nНапиши окно, которое нужно {verb} — формат <code>HH:MM-HH:MM</code>\nПример: <code>08:30-12:30</code>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✕ Отмена", callback_data=f"daily_d_{date_key}")]]))
+                [InlineKeyboardButton("✕ Отмена",
+                    callback_data=f"daily_{'x_' if mode == 'exclude' else 'd_'}{date_key}")]]))
         return
 
-    if data and (data.startswith("daily_add_20") or data.startswith("daily_rm_")):
-        is_add = data.startswith("daily_add_")
-        rest = data[len("daily_add_") if is_add else len("daily_rm_"):]
+    if data and (data.startswith("daily_add_20") or data.startswith("daily_rm_")
+                  or data.startswith("daily_xadd_") or data.startswith("daily_xrm_")):
+        # Detect operation
+        is_exclude = data.startswith("daily_xadd_") or data.startswith("daily_xrm_")
+        is_add = data.startswith("daily_add_") or data.startswith("daily_xadd_")
+        prefix_len = {
+            "daily_add_": len("daily_add_"),
+            "daily_rm_":  len("daily_rm_"),
+            "daily_xadd_": len("daily_xadd_"),
+            "daily_xrm_":  len("daily_xrm_"),
+        }
+        for p, l in prefix_len.items():
+            if data.startswith(p):
+                rest = data[l:]; break
         parts = rest.rsplit("_", 2)
         if len(parts) != 3:
             await q.answer("Ошибка", show_alert=False)
@@ -2863,34 +2946,37 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         date_key, hhmm_from, hhmm_to = parts
         window = f"{hhmm_from[:2]}:{hhmm_from[2:]}-{hhmm_to[:2]}:{hhmm_to[2:]}"
         w = u.setdefault("wizard", {}) or u["wizard"]
-        daily = w.setdefault("daily_windows", {})
-        cur = daily.get(date_key, [])
+        store_key = "daily_exclude" if is_exclude else "daily_windows"
+        store = w.setdefault(store_key, {})
+        cur = store.get(date_key, [])
+        verb = "исключено" if is_exclude else "включено"
         if is_add:
             if window in cur:
-                msg = f"Уже добавлено: {window}"
+                msg = f"Уже в списке: {window}"
             else:
                 cur.append(window); cur.sort()
-                msg = f"✅ Добавлено {window} — включено в мониторинг"
+                msg = f"{'🚫' if is_exclude else '✅'} {window} — {verb}"
         else:
             if window in cur:
                 cur.remove(window)
                 msg = f"❌ Убрано {window}"
             else:
-                msg = f"Окно не было активно"
+                msg = f"Окно не было в списке"
         if cur:
-            daily[date_key] = cur
+            store[date_key] = cur
         else:
-            daily.pop(date_key, None)
+            store.pop(date_key, None)
         set_user(uid, u)
         await q.answer(msg.split(" — ")[0], show_alert=False)
-        await _render_day_editor(q, get_user(uid), date_key, msg=msg)
+        await _render_day_editor(q, get_user(uid), date_key, msg=msg,
+                                 mode="exclude" if is_exclude else "include")
         return
 
     if data and data.startswith("daily_clr_"):
         date_key = data[len("daily_clr_"):]
         w = u.setdefault("wizard", {}) or u["wizard"]
-        daily = w.setdefault("daily_windows", {})
-        daily.pop(date_key, None)
+        (w.setdefault("daily_windows", {})).pop(date_key, None)
+        (w.setdefault("daily_exclude", {})).pop(date_key, None)
         set_user(uid, u)
         await q.answer("Очищен день")
         # Back to overview
@@ -3708,7 +3794,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "level_min": None,
             "level_max": None,
             "level_phase": "min",
-            "time_from": None, "time_to": None,
+            "time_from": "09:00", "time_to": "22:00",
             "time_from_h": 9, "time_from_m": 0,
             "time_to_h": 22, "time_to_m": 0,
             "frequency": 60, "dates_sub": None,
@@ -3738,8 +3824,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data == "wiz_begin":
         if u.get("wizard"):
-            u["wizard"]["editing"] = True
-            u["wizard"]["step"] = "location"
+            wz = u["wizard"]
+            wz["editing"] = True
+            wz["step"] = "location"
+            # Migrate legacy 00:00/23:30 defaults to the new 09:00/22:00
+            if wz.get("time_from") in (None, "00:00") and wz.get("time_from_h", 0) == 0:
+                wz["time_from"] = "09:00"; wz["time_from_h"] = 9; wz["time_from_m"] = 0
+            if wz.get("time_to") in (None, "23:30") and wz.get("time_to_h", 23) == 23 and wz.get("time_to_m", 30) == 30:
+                wz["time_to"] = "22:00"; wz["time_to_h"] = 22; wz["time_to_m"] = 0
             set_user(uid, u)
         else:
             u = wiz(uid)
@@ -3875,9 +3967,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         h_key = f"time_{phase}_h"
         m_key = f"time_{phase}_m"
+        h_default = 9 if phase == "from" else 22
 
         if action == "ok":
-            w[f"time_{phase}"] = fmt_time(w.get(h_key, 0), w.get(m_key, 0))
+            w[f"time_{phase}"] = fmt_time(w.get(h_key, h_default), w.get(m_key, 0))
             if phase == "from":
                 w["step"] = "time_to"
             else:
@@ -3896,7 +3989,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_step(q, uid, context)
             return
 
-        h = w.get(h_key, 0)
+        h = w.get(h_key, h_default)
         m = w.get(m_key, 0)
 
         if action == "h-1":
