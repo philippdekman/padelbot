@@ -1182,40 +1182,77 @@ def _main_menu_text(u, context, uid):
     )
 
 def _main_menu_kb(u, context, uid):
+    """Top-level menu with 5 sections."""
+    rows = [
+        [InlineKeyboardButton("🔍 Мониторинг матчей",  callback_data="sec_search")],
+        [InlineKeyboardButton("🎯 Бронь кортов",         callback_data="sec_courts")],
+        [InlineKeyboardButton("🗓 Моё расписание",         callback_data="sec_schedule")],
+        [InlineKeyboardButton("📈 Рейтинг",                  callback_data="sec_rating")],
+        [InlineKeyboardButton("⚙️ Настройки",               callback_data="sec_settings")],
+        [InlineKeyboardButton("📊 Статус мониторинга",     callback_data="status_check")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _section_search_kb(u, context, uid):
     has_wizard = bool(u.get("wizard"))
     search_on = bool(context.job_queue.get_jobs_by_name(f"watch_{uid}"))
     rows = []
     if has_wizard and not search_on:
-        rows.append([InlineKeyboardButton("▶ Возобновить поиск игр", callback_data="resume_search")])
+        rows.append([InlineKeyboardButton("▶ Возобновить поиск", callback_data="resume_search")])
     if has_wizard and search_on:
         rows.append([InlineKeyboardButton("Перенастроить поиск", callback_data="wiz_begin"),
-                     InlineKeyboardButton("Остановить", callback_data="stop_monitoring")])
+                     InlineKeyboardButton("⏹ Остановить", callback_data="stop_monitoring")])
     elif not has_wizard:
         rows.append([InlineKeyboardButton("Настроить постоянный поиск игр", callback_data="wiz_begin")])
     if has_wizard:
-        rows.append([InlineKeyboardButton("Время по дням (разные окна)", callback_data="daily_menu")])
-    rows.append([InlineKeyboardButton("Статус мониторинга", callback_data="status_check")])
-    rows.append([InlineKeyboardButton("Разовый поиск (по фильтрам, без мониторинга)", callback_data="oneoff_begin")])
+        rows.append([InlineKeyboardButton("Время по дням (окна/исключения)", callback_data="daily_menu")])
+    rows.append([InlineKeyboardButton("Разовый поиск (без мониторинга)", callback_data="oneoff_begin")])
+    rows.append([InlineKeyboardButton("Сбросить отметки «добавлено»", callback_data="reset_added")])
+    rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _section_courts_kb(u, context, uid):
     courts_on = bool(context.job_queue.get_jobs_by_name(f"courts_{uid}"))
-    rows.append([InlineKeyboardButton(
-        "Свободные корты: выключить" if courts_on else "Свободные корты (отмены/брони)",
-        callback_data="courts_menu"
-    )])
+    rows = [
+        [InlineKeyboardButton(
+            ("⏹ Свободные корты: выключить" if courts_on
+             else "▶ Свободные корты: включить"),
+            callback_data="courts_menu")],
+        [InlineKeyboardButton("← В меню", callback_data="back_main")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _section_schedule_kb(u, context, uid):
     my_on = bool(context.job_queue.get_jobs_by_name(f"my_watch_{uid}"))
-    rows += [
-        [InlineKeyboardButton("Мои матчи — добавить в календарь, открыть маршрут", callback_data="my_schedule")],
+    rows = [
+        [InlineKeyboardButton("Мои матчи — календарь и маршрут", callback_data="my_schedule")],
         [InlineKeyboardButton("Прошедшие матчи — картинка счёта", callback_data="my_results")],
         [InlineKeyboardButton("PDF календарь", callback_data="pdf_menu")],
-        [InlineKeyboardButton("Мой рейтинг и динамика", callback_data="rating_menu")],
         [InlineKeyboardButton(
-            "Уведомления о моих матчах: выключить" if my_on else "Уведомления о моих матчах: включить",
-            callback_data="my_watch_toggle"
-        )],
+            ("⏹ Уведомления о моих матчах: выкл" if my_on
+             else "▶ Уведомления о моих матчах: вкл"),
+            callback_data="my_watch_toggle")],
+        [InlineKeyboardButton("← В меню", callback_data="back_main")],
     ]
-    rows += [
+    return InlineKeyboardMarkup(rows)
+
+
+def _section_rating_kb(u, context, uid):
+    rows = [
+        [InlineKeyboardButton("Мой рейтинг и динамика", callback_data="rating_menu")],
+        [InlineKeyboardButton("← В меню", callback_data="back_main")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _section_settings_kb(u, context, uid):
+    rows = [
         [InlineKeyboardButton("Статус и параметры", callback_data="show_status")],
-        [InlineKeyboardButton("Сбросить все отметки «добавлено»", callback_data="reset_added")],
         [InlineKeyboardButton("Сменить аккаунт Playtomic", callback_data="reset_id")],
+        [InlineKeyboardButton("← В меню", callback_data="back_main")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -2690,6 +2727,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(
             "Аккаунт Playtomic отвязан. Пришли ссылку на новый профиль или нажми “В меню”.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return
+
+    # ── Section submenus ──
+    SECTION_KBS = {
+        "sec_search":   ("🔍 <b>Мониторинг матчей</b>", _section_search_kb),
+        "sec_courts":   ("🎯 <b>Бронь кортов</b>", _section_courts_kb),
+        "sec_schedule": ("🗓 <b>Моё расписание</b>", _section_schedule_kb),
+        "sec_rating":   ("📈 <b>Рейтинг</b>", _section_rating_kb),
+        "sec_settings": ("⚙️ <b>Настройки</b>", _section_settings_kb),
+    }
+    if data in SECTION_KBS:
+        title, kb_fn = SECTION_KBS[data]
+        await q.edit_message_text(title, parse_mode="HTML",
+                                  reply_markup=kb_fn(u, context, uid))
         return
 
     # ── Monitoring status ──
