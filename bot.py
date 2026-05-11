@@ -2633,27 +2633,34 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "daily_menu":
         w = u.get("wizard") or {}
         daily = w.get("daily_windows") or {}
+        DAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
         if not daily:
-            text = ("🕐 <b>Разные окна времени по дням</b>\n\n"
+            text = ("🕐 <b>Окна времени по дням</b>\n\n"
                     "Сейчас не настроены. Используется глобальный фильтр времени из визарда.\n\n"
-                    "Добавь дни с окнами — например «12.05 вечер», «14.05 утро». Если хотя бы один день задан, "
-                    "в выдачу попадут только эти дни и только в указанные окна.")
+                    "Нажми «+ Добавить день» или «Быстро: вечер на ближайшие 3 дня».")
+            rows = [[InlineKeyboardButton("+ Добавить день", callback_data="daily_add")],
+                    [InlineKeyboardButton("Быстро: вечер на 3 дня", callback_data="daily_quick_evening3")],
+                    [InlineKeyboardButton("← В меню", callback_data="back_main")]]
         else:
-            lines = ["🕐 <b>Разные окна времени по дням</b>\n"]
+            lines = ["🕐 <b>Активные окна по дням</b>\n"]
+            rows = []
             for d in sorted(daily.keys()):
                 try:
                     dt = datetime.strptime(d, "%Y-%m-%d")
-                    ds = dt.strftime("%a %d.%m")
+                    ds = f"{DAY_RU[dt.weekday()]} {dt.strftime('%d.%m')}"
                 except Exception:
                     ds = d
                 lines.append(f"• <b>{ds}</b>: " + ", ".join(daily[d]))
-            lines.append("\nДобавь или измени дни ниже.")
+                # Per-day edit & quick delete buttons
+                rows.append([
+                    InlineKeyboardButton(f"✏️ {ds}", callback_data=f"daily_d_{d}"),
+                    InlineKeyboardButton("❌ Убрать", callback_data=f"daily_clr_{d}"),
+                ])
             text = "\n".join(lines)
-        rows = [[InlineKeyboardButton("+ Добавить день", callback_data="daily_add")],
-                [InlineKeyboardButton("Быстро: вечер на ближайшие 3 дня", callback_data="daily_quick_evening3")]]
-        if daily:
-            rows.append([InlineKeyboardButton("Очистить все дни", callback_data="daily_clear_all")])
-        rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
+            rows.append([InlineKeyboardButton("+ Добавить ещё день", callback_data="daily_add")])
+            rows.append([InlineKeyboardButton("Быстро: вечер на 3 дня", callback_data="daily_quick_evening3")])
+            rows.append([InlineKeyboardButton("🗑 Сбросить все дни", callback_data="daily_clear_all")])
+            rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
         await q.edit_message_text(text, parse_mode="HTML",
                                   reply_markup=InlineKeyboardMarkup(rows))
         return
@@ -2698,11 +2705,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         w = u.setdefault("wizard", {}) or u["wizard"]
         w["daily_windows"] = {}
         set_user(uid, u)
-        await q.answer("Очищено")
-        # Re-show menu
-        u = get_user(uid)
-        await context.bot.send_message(q.message.chat_id, "Готово — все дни удалены. Нажми 'Время по дням'.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        await q.answer("Все дни удалены", show_alert=False)
+        # Show fresh empty state of the same screen
+        text = ("🕐 <b>Окна времени по дням</b>\n\n"
+                "Всё очищено. Поиск вернулся к глобальному фильтру времени из визарда.\n\n"
+                "Можешь добавить новые дни ниже.")
+        rows = [[InlineKeyboardButton("+ Добавить день", callback_data="daily_add")],
+                [InlineKeyboardButton("Быстро: вечер на 3 дня", callback_data="daily_quick_evening3")],
+                [InlineKeyboardButton("← В меню", callback_data="back_main")]]
+        await q.edit_message_text(text, parse_mode="HTML",
+                                  reply_markup=InlineKeyboardMarkup(rows))
         return
 
     if data == "daily_add":
