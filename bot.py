@@ -316,16 +316,19 @@ def _to_local(dt, loc_name):
 
 def filter_matches(matches, cfg, loc_dates):
     result = []
-    # If daily_windows are set, derive the date range from them.
-    # This overrides loc_dates so that adding a day to daily_windows
-    # automatically extends the search range.
+    # Date range = UNION of wizard's loc_dates and daily_windows keys.
+    # Both ranges are valid; the search uses min(from) ... max(to).
     daily = cfg.get("daily_windows") or {}
+    primary_from = loc_dates.get("from")
+    primary_to   = loc_dates.get("to")
     if daily:
         keys = sorted(daily.keys())
-        date_from, date_to = keys[0], keys[-1]
+        d_from, d_to = keys[0], keys[-1]
+        date_from = min(primary_from, d_from) if primary_from else d_from
+        date_to   = max(primary_to,   d_to)   if primary_to   else d_to
     else:
-        date_from = loc_dates.get("from")
-        date_to = loc_dates.get("to")
+        date_from = primary_from
+        date_to   = primary_to
     time_from = cfg.get("time_from")
     time_to = cfg.get("time_to")
     level_min = cfg.get("level_min")
@@ -410,27 +413,21 @@ def _parse_hhmm_to_mins(s: str):
 
 
 def _time_filter_passes(local_dt, cfg):
-    """Return True if the event's local time passes the configured time filter.
+    """True if the event's local time passes the configured time filter.
 
-    Priority:
-      1) daily_windows: {"YYYY-MM-DD": ["HH:MM-HH:MM", ...]} — if the event's
-         date is a key, only those windows on that date are allowed.
-         Any event on a date NOT in daily_windows is blocked.
-      2) Legacy time_from / time_to: global window applied to every day.
-
-    If daily_windows is set but empty ({}), we treat it as "no day is allowed"
-    for safety — the user can clear the dict to fall back to legacy behaviour.
+    Combined semantics (both date sources are valid):
+      - If the event's date is listed in daily_windows → must fit one of its windows.
+      - Otherwise → falls back to the global time_from/time_to window.
+        (The global window still applies on days NOT listed in daily_windows,
+         so a day inside the wizard date range works with the default hours.)
     """
     if not local_dt:
         return True
     daily = cfg.get("daily_windows") or {}
-    if daily:
-        day_key = local_dt.date().isoformat()
-        windows = daily.get(day_key)
-        if not windows:
-            return False
-        event_mins = local_dt.hour * 60 + local_dt.minute
-        for w in windows:
+    event_mins = local_dt.hour * 60 + local_dt.minute
+    day_key = local_dt.date().isoformat()
+    if day_key in daily:
+        for w in daily[day_key]:
             try:
                 fr, to = w.split("-", 1)
                 f = _parse_hhmm_to_mins(fr.strip())
@@ -442,9 +439,8 @@ def _time_filter_passes(local_dt, cfg):
             except Exception:
                 continue
         return False
-    # Legacy single-window filter
+    # Day not in daily_windows → global window from wizard.
     tf = cfg.get("time_from"); tt = cfg.get("time_to")
-    event_mins = local_dt.hour * 60 + local_dt.minute
     if tf:
         f = _parse_hhmm_to_mins(tf)
         if f is not None and event_mins < f:
@@ -469,12 +465,16 @@ def _is_female_only(text: str) -> bool:
 def filter_tournaments(tournaments, cfg, loc_dates):
     result = []
     daily = cfg.get("daily_windows") or {}
+    primary_from = loc_dates.get("from")
+    primary_to   = loc_dates.get("to")
     if daily:
         keys = sorted(daily.keys())
-        date_from, date_to = keys[0], keys[-1]
+        d_from, d_to = keys[0], keys[-1]
+        date_from = min(primary_from, d_from) if primary_from else d_from
+        date_to   = max(primary_to,   d_to)   if primary_to   else d_to
     else:
-        date_from = loc_dates.get("from")
-        date_to = loc_dates.get("to")
+        date_from = primary_from
+        date_to   = primary_to
     time_from = cfg.get("time_from")
     time_to = cfg.get("time_to")
     level_min = cfg.get("level_min")
@@ -879,8 +879,8 @@ def wiz(uid):
             "level_phase": "min",
             "time_from": None,
             "time_to": None,
-            "time_from_h": 0, "time_from_m": 0,
-            "time_to_h": 23, "time_to_m": 30,
+            "time_from_h": 9, "time_from_m": 0,
+            "time_to_h": 22, "time_to_m": 0,
             "frequency": 60,
             "dates_sub": None,
         }
@@ -1020,16 +1020,48 @@ def kb_confirm(modifying=False, oneoff=False):
         buttons.append([InlineKeyboardButton("Применить (без перезапуска)", callback_data="wiz_apply")])
     buttons.append([InlineKeyboardButton("Запустить мониторинг", callback_data="wiz_go")])
     buttons.append([InlineKeyboardButton("Поиск сейчас (без мониторинга)", callback_data="wiz_search")])
-    buttons.append([InlineKeyboardButton("Перенастроить с нуля", callback_data="wiz_restart")])
+    # Nav row (Назад · С нуля · Отмена) added by show_step()
     return InlineKeyboardMarkup(buttons)
 
 # ─── Step renderer ──────────────────────────────────────────────────
+# Step ordering — used for the "← Назад" navigation button
+WIZ_STEP_ORDER = [
+    "location", "radius", "dates",
+    "min_players_m", "min_players_t", "level",
+    "time_from", "time_to", "frequency", "confirm"
+]
+
+
+def _wiz_prev_step(step):
+    """Return the previous step name, or None if there is none."""
+    try:
+        i = WIZ_STEP_ORDER.index(step)
+        return WIZ_STEP_ORDER[i - 1] if i > 0 else None
+    except ValueError:
+        return None
+
+
+def _wiz_nav_row(step):
+    """Build the bottom navigation row: ← Назад · 🔄 С нуля · Отмена."""
+    row = []
+    if _wiz_prev_step(step):
+        row.append(InlineKeyboardButton("← Назад", callback_data="wiz_back"))
+    row.append(InlineKeyboardButton("🔄 С нуля", callback_data="wiz_restart"))
+    row.append(InlineKeyboardButton("✕ Отмена", callback_data="back_main"))
+    return row
+
+
 async def show_step(source, uid, context):
     u = wiz(uid)
     w = u["wizard"]
     step = w["step"]
 
     async def send(text, kb):
+        # Always append a navigation row at the bottom of every wizard step.
+        nav = _wiz_nav_row(step)
+        existing_rows = list(kb.inline_keyboard) if kb else []
+        existing_rows.append(nav)
+        kb = InlineKeyboardMarkup(existing_rows)
         if hasattr(source, "edit_message_text"):
             try:
                 await source.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
@@ -1076,7 +1108,7 @@ async def show_step(source, uid, context):
         await send(f"🎯 <b>Шаг 6/8 — Уровень ({label}):</b>\n\nТекущий: {val:.1f}", kb_level(phase, val))
 
     elif step == "time_from":
-        h, m = w.get("time_from_h", 0), w.get("time_from_m", 0)
+        h, m = w.get("time_from_h", 9), w.get("time_from_m", 0)
         await send(
             f"🕐 <b>Шаг 7/8 — Время начала события ОТ:</b>\n\nТекущее: {fmt_time(h, m)}\n"
             "Фильтр по фактическому времени начала матча/турнира.",
@@ -1084,7 +1116,7 @@ async def show_step(source, uid, context):
         )
 
     elif step == "time_to":
-        h, m = w.get("time_to_h", 23), w.get("time_to_m", 30)
+        h, m = w.get("time_to_h", 22), w.get("time_to_m", 0)
         await send(
             f"🕐 <b>Шаг 7/8 — Время начала события ДО:</b>\n\nТекущее: {fmt_time(h, m)}\n"
             "Фильтр по фактическому времени начала матча/турнира.",
@@ -2410,6 +2442,8 @@ async def _render_day_editor(target, u, date_key, msg=""):
     for win in cur:
         rows.append([InlineKeyboardButton(f"❌ Убрать {win}",
             callback_data=f"daily_rm_{date_key}_{win.replace(':','').replace('-','_')}")])
+    rows.append([InlineKeyboardButton("🕰 Кастомное время (ввести вручную)",
+                                 callback_data=f"daily_custom_{date_key}")])
     rows.append([InlineKeyboardButton("← Выбрать другой день", callback_data="daily_add")])
     rows.append([InlineKeyboardButton("← Обзор всех дней", callback_data="daily_menu")])
     rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
@@ -2452,17 +2486,61 @@ async def cmd_setid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
 
+_WINDOW_RE = re.compile(r"^\s*(\d{1,2})[:.](\d{2})\s*[-–—]\s*(\d{1,2})[:.](\d{2})\s*$")
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Catch profile links pasted directly into chat."""
+    """Handle plain-text input: profile links + custom time windows."""
     if not update.message or not update.message.text:
         return
-    text = update.message.text
-    pt_id = parse_playtomic_id(text)
-    if not pt_id or "playtomic.io/profile/user/" not in text:
-        return
+    text = update.message.text.strip()
     uid = update.effective_user.id
     chat_id = update.effective_chat.id
     u = get_user(uid)
+
+    # ── Custom daily window input ──
+    awaiting_date = u.get("awaiting_custom_window_for")
+    if awaiting_date:
+        m = _WINDOW_RE.match(text)
+        if not m:
+            await update.message.reply_text(
+                "Формат: <code>HH:MM-HH:MM</code>. Пример: <code>09:30-13:45</code>",
+                parse_mode="HTML")
+            return
+        h1, m1, h2, m2 = map(int, m.groups())
+        if not (0 <= h1 <= 23 and 0 <= m1 <= 59 and 0 <= h2 <= 23 and 0 <= m2 <= 59):
+            await update.message.reply_text("Часы 0–23, минуты 0–59.")
+            return
+        mins1 = h1 * 60 + m1
+        mins2 = h2 * 60 + m2
+        if mins2 <= mins1:
+            await update.message.reply_text("Конец должен быть позже начала.")
+            return
+        window = f"{h1:02d}:{m1:02d}-{h2:02d}:{m2:02d}"
+        w_cfg = u.setdefault("wizard", {}) or u["wizard"]
+        daily = w_cfg.setdefault("daily_windows", {})
+        cur = daily.get(awaiting_date, [])
+        if window not in cur:
+            cur.append(window); cur.sort()
+            daily[awaiting_date] = cur
+        u["awaiting_custom_window_for"] = None
+        set_user(uid, u)
+        try:
+            dt = datetime.strptime(awaiting_date, "%Y-%m-%d")
+            DAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+            ds = f"{DAY_RU[dt.weekday()]} {dt.strftime('%d.%m')}"
+        except Exception:
+            ds = awaiting_date
+        await update.message.reply_text(
+            f"✅ Добавлено {window} в {ds}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"← К {ds}", callback_data=f"daily_d_{awaiting_date}")],
+                [InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return
+
+    pt_id = parse_playtomic_id(text)
+    if not pt_id or "playtomic.io/profile/user/" not in text:
+        return
     u["playtomic_user_id"] = pt_id
     # Авто-включаем мониторинг рейтинга (проверка каждые 3 часа)
     try:
@@ -2756,6 +2834,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data and data.startswith("daily_d_"):
         date_key = data[len("daily_d_"):]
         await _render_day_editor(q, u, date_key, msg="")
+        return
+
+    if data and data.startswith("daily_custom_"):
+        date_key = data[len("daily_custom_"):]
+        u["awaiting_custom_window_for"] = date_key
+        set_user(uid, u)
+        try:
+            dt = datetime.strptime(date_key, "%Y-%m-%d")
+            DAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+            ds = f"{DAY_RU[dt.weekday()]} {dt.strftime('%d.%m')}"
+        except Exception:
+            ds = date_key
+        await q.edit_message_text(
+            f"🕰 <b>{ds}</b>\n\nНапиши окно в формате <code>HH:MM-HH:MM</code>\nПример: <code>08:30-12:30</code>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✕ Отмена", callback_data=f"daily_d_{date_key}")]]))
         return
 
     if data and (data.startswith("daily_add_20") or data.startswith("daily_rm_")):
@@ -3614,8 +3709,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "level_max": None,
             "level_phase": "min",
             "time_from": None, "time_to": None,
-            "time_from_h": 0, "time_from_m": 0,
-            "time_to_h": 23, "time_to_m": 30,
+            "time_from_h": 9, "time_from_m": 0,
+            "time_to_h": 22, "time_to_m": 0,
             "frequency": 60, "dates_sub": None,
             "oneoff": True,
         }
@@ -3631,6 +3726,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u["seen_events"] = {}
         set_user(uid, u)
         u = wiz(uid)
+        await show_step(q, uid, context)
+        return
+    if data == "wiz_back":
+        w = u.get("wizard") or {}
+        prev = _wiz_prev_step(w.get("step", "location"))
+        if prev:
+            w["step"] = prev
+            set_user(uid, u)
         await show_step(q, uid, context)
         return
     if data == "wiz_begin":
