@@ -276,9 +276,9 @@ def render_score_image(match: dict, my_user_id: str, output_path: str):
         lbl = f"СЕТ {i + 1}"
         bb = d.textbbox((0, 0), lbl, font=f_hdr)
         d.text((cx - (bb[2] - bb[0]) // 2, hdr_y), lbl, fill=DIM, font=f_hdr)
-    bb = d.textbbox((0, 0), "ИТОГ", font=f_hdr)
+    bb = d.textbbox((0, 0), "СЕТЫ", font=f_hdr)
     d.text((total_x + total_col_w // 2 - (bb[2] - bb[0]) // 2, hdr_y),
-           "ИТОГ", fill=accent, font=f_hdr)
+           "СЕТЫ", fill=accent, font=f_hdr)
 
     # Two rows: my team (top), opp (bottom)
     row_top_y = sb_top + 90
