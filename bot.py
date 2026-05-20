@@ -2844,11 +2844,139 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ])
             text = "\n".join(lines)
         rows.append([InlineKeyboardButton("+ Добавить день", callback_data="daily_add")])
+        rows.append([InlineKeyboardButton("📆 Диапазон дат + общее окно", callback_data="daily_range")])
         rows.append([InlineKeyboardButton("Быстро: вечер на 3 дня", callback_data="daily_quick_evening3")])
         if all_dates:
             rows.append([InlineKeyboardButton("🗑 Сбросить всё", callback_data="daily_clear_all")])
         rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
         await q.edit_message_text(text, parse_mode="HTML",
+                                  reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data == "daily_range":
+        # Step 1: pick range start
+        today = datetime.utcnow().date()
+        DAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        rows = []
+        buf = []
+        for off in range(0, 21):
+            d = today + timedelta(days=off)
+            buf.append(InlineKeyboardButton(
+                f"{DAY_RU[d.weekday()]} {d.strftime('%d.%m')}",
+                callback_data=f"daily_rfrom_{d.isoformat()}"))
+            if len(buf) == 2:
+                rows.append(buf); buf = []
+        if buf: rows.append(buf)
+        rows.append([InlineKeyboardButton("← Назад", callback_data="daily_menu")])
+        await q.edit_message_text("📆 Диапазон дат\n\nВыбери <b>начало</b> диапазона:",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data and data.startswith("daily_rfrom_"):
+        from_d = data[len("daily_rfrom_"):]
+        try:
+            d_from = datetime.strptime(from_d, "%Y-%m-%d").date()
+        except Exception:
+            await q.answer("Ошибка"); return
+        DAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        rows = []
+        buf = []
+        # show only dates >= from_d, up to 21 days from today
+        for off in range(0, 21):
+            d = datetime.utcnow().date() + timedelta(days=off)
+            if d < d_from: continue
+            buf.append(InlineKeyboardButton(
+                f"{DAY_RU[d.weekday()]} {d.strftime('%d.%m')}",
+                callback_data=f"daily_rto_{from_d}_{d.isoformat()}"))
+            if len(buf) == 2:
+                rows.append(buf); buf = []
+        if buf: rows.append(buf)
+        rows.append([InlineKeyboardButton("← Назад", callback_data="daily_range")])
+        ds = f"{DAY_RU[d_from.weekday()]} {d_from.strftime('%d.%m')}"
+        await q.edit_message_text(
+            f"📆 Начало: <b>{ds}</b>\n\nВыбери <b>конец</b> диапазона:",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data and data.startswith("daily_rto_"):
+        parts = data[len("daily_rto_"):].split("_", 1)
+        if len(parts) != 2:
+            await q.answer("Ошибка"); return
+        from_d, to_d = parts
+        DAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        try:
+            dF = datetime.strptime(from_d, "%Y-%m-%d").date()
+            dT = datetime.strptime(to_d, "%Y-%m-%d").date()
+        except Exception:
+            await q.answer("Ошибка"); return
+        rng = f"{DAY_RU[dF.weekday()]} {dF.strftime('%d.%m')} → {DAY_RU[dT.weekday()]} {dT.strftime('%d.%m')}"
+        rows = []
+        for label, win in _DAILY_PRESETS:
+            rows.append([InlineKeyboardButton(label,
+                callback_data=f"daily_rwin_{from_d}_{to_d}_{win.replace(':','').replace('-','_')}")])
+        rows.append([InlineKeyboardButton("← Назад", callback_data=f"daily_rfrom_{from_d}")])
+        await q.edit_message_text(
+            f"📆 <b>{rng}</b>\n\nВыбери окно, которое применится ко всем дням диапазона:",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data and data.startswith("daily_rwin_"):
+        rest = data[len("daily_rwin_"):]
+        parts = rest.rsplit("_", 2)
+        if len(parts) != 3:
+            await q.answer("Ошибка"); return
+        range_part, hhmm_from, hhmm_to = parts
+        range_dates = range_part.split("_")
+        if len(range_dates) != 2:
+            await q.answer("Ошибка"); return
+        from_d, to_d = range_dates
+        window = f"{hhmm_from[:2]}:{hhmm_from[2:]}-{hhmm_to[:2]}:{hhmm_to[2:]}"
+        try:
+            dF = datetime.strptime(from_d, "%Y-%m-%d").date()
+            dT = datetime.strptime(to_d, "%Y-%m-%d").date()
+        except Exception:
+            await q.answer("Ошибка"); return
+        if dT < dF:
+            await q.answer("Конец должен быть позже начала")
+            return
+        w = u.setdefault("wizard", {}) or u["wizard"]
+        daily = w.setdefault("daily_windows", {})
+        added = 0
+        cur_d = dF
+        while cur_d <= dT:
+            k = cur_d.isoformat()
+            cur_list = daily.get(k, [])
+            if window not in cur_list:
+                cur_list.append(window); cur_list.sort()
+                daily[k] = cur_list
+                added += 1
+            cur_d += timedelta(days=1)
+        set_user(uid, u)
+        await q.answer(f"Добавлено {added} дн.", show_alert=False)
+        # Show daily_menu overview
+        u = get_user(uid)
+        daily = (u.get("wizard") or {}).get("daily_windows") or {}
+        excl = (u.get("wizard") or {}).get("daily_exclude") or {}
+        DAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        lines = [f"✅ Добавлено {window} на {added} дн.\n\n🕐 <b>Активные окна:</b>"]
+        for d in sorted(set(list(daily.keys()) + list(excl.keys()))):
+            try:
+                dt = datetime.strptime(d, "%Y-%m-%d")
+                ds = f"{DAY_RU[dt.weekday()]} {dt.strftime('%d.%m')}"
+            except Exception:
+                ds = d
+            inc_w = daily.get(d, [])
+            exc_w = excl.get(d)
+            parts = []
+            if inc_w: parts.append("✅ " + ", ".join(inc_w))
+            if exc_w is not None:
+                parts.append("🚫 " + (", ".join(exc_w) if exc_w else "весь день"))
+            lines.append(f"• <b>{ds}</b>: " + " | ".join(parts))
+        rows = [[InlineKeyboardButton("+ Добавить день", callback_data="daily_add")],
+                [InlineKeyboardButton("📆 Диапазон дат + общее окно", callback_data="daily_range")],
+                [InlineKeyboardButton("🗑 Сбросить всё", callback_data="daily_clear_all")],
+                [InlineKeyboardButton("← В меню", callback_data="back_main")]]
+        await q.edit_message_text("\n".join(lines), parse_mode="HTML",
                                   reply_markup=InlineKeyboardMarkup(rows))
         return
 
