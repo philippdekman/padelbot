@@ -347,7 +347,9 @@ def filter_matches(matches, cfg, loc_dates):
         include_private = bool(cfg.get("include_private"))
         if not include_private and m.get("visibility") and m.get("visibility") != "VISIBLE":
             continue
-        # Пропускаем женские матчи по названию/описанию/локации
+        # Skip women-only matches: explicit gender field OR keywords in text
+        if m.get("gender") == "FEMALE":
+            continue
         if (_is_female_only(m.get("name", "")) or _is_female_only(m.get("description", ""))
             or _is_female_only(m.get("location", ""))
             or _is_beginner_event(m.get("name", "")) or _is_beginner_event(m.get("description", ""))):
@@ -523,7 +525,9 @@ def filter_tournaments(tournaments, cfg, loc_dates):
             continue
         if t.get("tournament_status") not in (None, "REGISTRATION_OPEN", "OPEN", "PENDING"):
             continue
-        # Пропускаем женские турниры
+        # Skip women-only tournaments: explicit gender field OR keywords
+        if t.get("gender") == "FEMALE":
+            continue
         if (_is_female_only(t.get("name", "")) or _is_female_only(t.get("description", ""))
             or _is_beginner_event(t.get("name", "")) or _is_beginner_event(t.get("description", ""))):
             continue
