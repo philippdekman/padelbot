@@ -4286,6 +4286,14 @@ def _diff_my_matches(prev_states, current_matches, pt_id, watch_init_at=None):
 
         if prev is None:
             # New match this user is involved in
+            # Skip canceled or already-played matches — these surface from
+            # API sync long after the fact and are not real "joins".
+            if cur["status"] == "CANCELED":
+                continue
+            sd = m.get("start_date", "")
+            today_iso = datetime.utcnow().date().isoformat()
+            if sd[:10] < today_iso:
+                continue
             if pt_id in cur["player_ids"] or cur["my_request_status"]:
                 if cur["my_request_status"] == "PENDING":
                     events.append((f"📝 <b>Новая заявка</b>\n{label}", m))
