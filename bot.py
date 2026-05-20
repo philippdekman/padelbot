@@ -349,7 +349,8 @@ def filter_matches(matches, cfg, loc_dates):
             continue
         # Пропускаем женские матчи по названию/описанию/локации
         if (_is_female_only(m.get("name", "")) or _is_female_only(m.get("description", ""))
-            or _is_female_only(m.get("location", ""))):
+            or _is_female_only(m.get("location", ""))
+            or _is_beginner_event(m.get("name", "")) or _is_beginner_event(m.get("description", ""))):
             continue
 
         dt = parse_dt(m.get("start_date"))
@@ -390,6 +391,23 @@ def filter_matches(matches, cfg, loc_dates):
             else:
                 # Match has no declared level range — skip it when the user set one.
                 continue
+
+        # Joined-player level check: if any current player is far below the
+        # user's minimum level, hide the match. "Far below" = more than 0.5
+        # below user's level_min. This complements the organizer-set range
+        # check, which can be wide and let very weak players in.
+        if level_min is not None:
+            try:
+                user_min = float(level_min)
+                threshold = user_min - 0.5
+                joined_levels = [float(p["level_value"])
+                                 for team in m.get("teams", [])
+                                 for p in team.get("players", [])
+                                 if p.get("level_value") is not None]
+                if joined_levels and min(joined_levels) < threshold:
+                    continue
+            except Exception:
+                pass
 
         # Min players
         if match_players(m) < min_pl:
@@ -462,6 +480,15 @@ def _time_filter_passes(local_dt, cfg):
     return True
 
 
+BEGINNER_KEYWORDS = ("beginner", "beginners", "novice", "начинающ", "новичок", "новичков", "newbie")
+
+
+def _is_beginner_event(text: str) -> bool:
+    if not text: return False
+    t = text.lower()
+    return any(k in t for k in BEGINNER_KEYWORDS)
+
+
 FEMALE_KEYWORDS = ("lady", "ladies", "girl", "girls", "women", "female",
                    "женский", "женская", "девушк", "женщин")
 
@@ -499,7 +526,8 @@ def filter_tournaments(tournaments, cfg, loc_dates):
         if t.get("tournament_status") not in (None, "REGISTRATION_OPEN", "OPEN", "PENDING"):
             continue
         # Пропускаем женские турниры
-        if _is_female_only(t.get("name", "")) or _is_female_only(t.get("description", "")):
+        if (_is_female_only(t.get("name", "")) or _is_female_only(t.get("description", ""))
+            or _is_beginner_event(t.get("name", "")) or _is_beginner_event(t.get("description", ""))):
             continue
 
         dt = parse_dt(t.get("start_date"))
