@@ -528,8 +528,11 @@ def filter_tournaments(tournaments, cfg, loc_dates):
         # Skip women-only tournaments: explicit gender field OR keywords
         if t.get("gender") == "FEMALE":
             continue
-        if (_is_female_only(t.get("name", "")) or _is_female_only(t.get("description", ""))
-            or _is_beginner_event(t.get("name", "")) or _is_beginner_event(t.get("description", ""))):
+        # Playtomic stores the tournament title under tournament_name (not name)
+        t_title = t.get("tournament_name") or t.get("name") or ""
+        t_desc = t.get("description") or ""
+        if (_is_female_only(t_title) or _is_female_only(t_desc)
+            or _is_beginner_event(t_title) or _is_beginner_event(t_desc)):
             continue
 
         dt = parse_dt(t.get("start_date"))
