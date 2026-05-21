@@ -1548,13 +1548,21 @@ def render_calendar_pdf(matches, pt_id, start_date, end_date, output_path, locat
         cur = len(players)
         join_info = m.get("join_requests_info") or {}
         my_req = next((r for r in join_info.get("requests", []) if r.get("user_id") == pt_id), None)
+        in_team = any(p.get("user_id") == pt_id for p in players)
         is_full = max_p > 0 and cur >= max_p
-        if my_req and my_req.get("status") == "PENDING":
-            kind = "pending"
-        elif is_full:
-            kind = "full"
+        # PDF calendar should ONLY show matches where the user actually
+        # plays or has a request. "full" matches the user isn't part of
+        # would otherwise show as green even though the user has no slot.
+        if not in_team and not (my_req and my_req.get("status") in ("PENDING", "APPROVED")):
+            continue
+        if in_team and is_full:
+            kind = "full"        # green: confirmed playing, team complete
+        elif in_team:
+            kind = "open"        # yellow: in team but still gathering
+        elif my_req and my_req.get("status") == "PENDING":
+            kind = "pending"     # blue: request pending
         else:
-            kind = "open"
+            kind = "pending"     # approved but not yet in team (waitlist)
         end_dt = dt + timedelta(minutes=90)
         if m.get("end_date"):
             try:
@@ -1609,9 +1617,9 @@ def render_calendar_pdf(matches, pt_id, start_date, end_date, output_path, locat
     legend_y = title_y - 4; legend_x = PAGE_W - MARGIN_R
     c.setFont(F_REG, 9)
     for fill, border, label in [
-        (BLUE_FILL, BLUE_BORDER, "My request"),
-        (YELLOW_FILL, YELLOW_BORDER, "Open"),
-        (GREEN_FILL, GREEN_BORDER, "Team complete"),
+        (BLUE_FILL, BLUE_BORDER, "My request / waitlist"),
+        (YELLOW_FILL, YELLOW_BORDER, "I'm playing (gathering)"),
+        (GREEN_FILL, GREEN_BORDER, "I'm playing (4/4)"),
     ]:
         text_w = c.stringWidth(label, F_REG, 9)
         legend_x -= text_w + 9 + 14
