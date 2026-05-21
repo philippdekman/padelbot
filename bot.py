@@ -1446,8 +1446,15 @@ def format_my_schedule(matches, playtomic_user_id):
         is_full = len(all_players) >= max_p
 
         if m.get("status") == "CONFIRMED":
-            confirmed.append(m)
-        elif my_request and my_request.get("status") == "PENDING":
+            if in_team:
+                confirmed.append(m)
+            # If status is CONFIRMED but user isn't actually in the team,
+            # it's a waitlisted closed match — skip.
+            continue
+        # Skip closed 4/4 matches where user isn't in the team
+        if not in_team and is_full:
+            continue
+        if my_request and my_request.get("status") == "PENDING":
             pending_join.append(m)
         elif in_team and is_full:
             open_full.append(m)
@@ -1551,8 +1558,11 @@ def render_calendar_pdf(matches, pt_id, start_date, end_date, output_path, locat
         in_team = any(p.get("user_id") == pt_id for p in players)
         is_full = max_p > 0 and cur >= max_p
         # PDF calendar should ONLY show matches where the user actually
-        # plays or has a request. "full" matches the user isn't part of
-        # would otherwise show as green even though the user has no slot.
+        # plays or has a request and there's still a slot. If team is
+        # already 4/4 and the user isn't on it, skip entirely — the request
+        # is effectively waitlisted on a closed match.
+        if not in_team and is_full:
+            continue
         if not in_team and not (my_req and my_req.get("status") in ("PENDING", "APPROVED")):
             continue
         if in_team and is_full:
