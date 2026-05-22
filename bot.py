@@ -2541,7 +2541,7 @@ async def _render_day_editor(target, u, date_key, msg="", mode="include"):
     except Exception:
         ds = date_key
     text = (msg + "\n\n") if msg else ""
-    text += f"<b>{ds}</b>\n"
+    text += f"<b>{ds}</b>  <i>(изменения сохраняются автоматически)</i>\n"
     text += "Включено: " + (", ".join(inc_cur) if inc_cur else "нет") + "\n"
     text += "Исключено: " + (", ".join(exc_cur) if exc_cur else "нет")
     if mode == "exclude":
@@ -2573,8 +2573,8 @@ async def _render_day_editor(target, u, date_key, msg="", mode="include"):
     if mode == "exclude":
         rows.append([InlineKeyboardButton("🚫 Исключить весь день",
                                          callback_data=f"daily_xall_{date_key}")])
+    rows.append([InlineKeyboardButton("✅ Готово — к списку дней", callback_data="daily_menu")])
     rows.append([InlineKeyboardButton("← Выбрать другой день", callback_data="daily_add")])
-    rows.append([InlineKeyboardButton("← Обзор всех дней", callback_data="daily_menu")])
     rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
     await target.edit_message_text(text, parse_mode="HTML",
                                    reply_markup=InlineKeyboardMarkup(rows))
