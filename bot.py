@@ -3278,26 +3278,34 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "daily_add":
-        # Show next 14 days; mark days that already have windows
+        # Show next 21 days; mark days that have include/exclude windows
         w = u.get("wizard") or {}
         daily = w.get("daily_windows") or {}
+        excl = w.get("daily_exclude") or {}
         today = datetime.utcnow().date()
         rows = []
         DAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-        for off in range(0, 14):
+        for off in range(0, 21):
             d = today + timedelta(days=off)
             key = d.isoformat()
-            mark = " ✅" if key in daily and daily[key] else ""
+            has_inc = key in daily and daily[key]
+            has_exc = key in excl
+            mark = ""
+            if has_inc and has_exc:
+                mark = " ✅🚫"
+            elif has_inc:
+                mark = " ✅"
+            elif has_exc:
+                mark = " 🚫"
             label = f"{DAY_RU[d.weekday()]} {d.strftime('%d.%m')}{mark}"
             rows.append([InlineKeyboardButton(label, callback_data=f"daily_d_{key}")])
-            if len(rows) >= 14: break
-        # group into pairs of 2 for compactness
         grouped = []
         for i in range(0, len(rows), 2):
             grouped.append(rows[i] + (rows[i+1] if i+1 < len(rows) else []))
         grouped.append([InlineKeyboardButton("← Назад", callback_data="daily_menu")])
-        await q.edit_message_text("Выбери день, который настроить:",
-                                  reply_markup=InlineKeyboardMarkup(grouped))
+        await q.edit_message_text(
+            "Выбери день (✅ — в мониторинге, 🚫 — исключён):",
+            reply_markup=InlineKeyboardMarkup(grouped))
         return
 
     if data and data.startswith("daily_d_"):
