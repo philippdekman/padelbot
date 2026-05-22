@@ -2965,7 +2965,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         jq = context.job_queue
         def jobs(name):
             return jq.get_jobs_by_name(name)
-        search_jobs = jobs(f"watch_tick_{uid}")
+        search_jobs = jobs(f"watch_{uid}")
         my_jobs = jobs(f"my_watch_{uid}")
         score_jobs = jobs(f"score_watch_{uid}")
         courts_jobs = jobs(f"courts_{uid}")
@@ -3022,7 +3022,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "\n".join(lines)
         rows = []
         if not search_jobs and w.get("locations"):
-            rows.append([InlineKeyboardButton("▶️ Запустить поиск матчей", callback_data="wiz_save")])
+            rows.append([InlineKeyboardButton("▶️ Запустить поиск матчей", callback_data="wiz_go")])
         rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
         await q.edit_message_text(text, parse_mode="HTML",
                                   reply_markup=InlineKeyboardMarkup(rows))
