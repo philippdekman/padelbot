@@ -635,7 +635,24 @@ def fmt_local_dt(dt, loc_name):
     return local.strftime("%d.%m %H:%M") if local else "?"
 
 # ─── Formatting ─────────────────────────────────────────────────────
-def fmt_match(m):
+def _fmt_player(p, following=None, with_level=True):
+    """Render a player as <b><a href=profile>Name</a></b> level if followed."""
+    pname = (p.get("full_name") or p.get("name") or "").strip() or "?"
+    pname = pname.replace("<", "&lt;").replace(">", "&gt;")
+    uid_s = str(p.get("user_id") or "")
+    plvl = p.get("level_value")
+    lvl_str = f" ({plvl:.2f})" if (with_level and plvl is not None) else ""
+    if uid_s:
+        link = f"https://app.playtomic.io/profile/user/{uid_s}"
+        name_html = f'<a href="{link}">{pname}</a>'
+    else:
+        name_html = pname
+    if following and uid_s in following:
+        name_html = f"<b>{name_html}</b>"
+    return f"{name_html}{lvl_str}"
+
+
+def fmt_match(m, following=None):
     dt = parse_dt(m.get("start_date"))
     loc = m.get("_location", "")
     dt_str = fmt_local_dt(dt, loc)
@@ -666,18 +683,11 @@ def fmt_match(m):
     # Show players in match
     all_players = [p for team in m.get("teams", []) for p in team.get("players", [])]
     if all_players:
-        names = []
-        for p in all_players:
-            pname = (p.get("full_name") or p.get("name") or "").strip() or "?"
-            plvl = p.get("level_value")
-            if plvl is not None:
-                names.append(f"{pname} ({plvl:.1f})")
-            else:
-                names.append(pname)
+        names = [_fmt_player(p, following=following, with_level=True) for p in all_players]
         line += f"\n   📝 {', '.join(names)}"
     return line
 
-def fmt_tournament(t):
+def fmt_tournament(t, following=None):
     dt = parse_dt(t.get("start_date"))
     loc = t.get("_location", "")
     dt_str = fmt_local_dt(dt, loc)
@@ -707,12 +717,7 @@ def fmt_tournament(t):
     if players:
         line += "\n   📝 Участники:"
         for p in players[:12]:
-            pname = (p.get("full_name") or p.get("name") or "?").strip()
-            if not pname or pname == "?":
-                pname = "Noname"
-            plvl = p.get("level_value")
-            lvl_str = f" ({plvl:.2f})" if plvl is not None else ""
-            line += f"\n      • {pname}{lvl_str}"
+            line += f"\n      • {_fmt_player(p, following=following, with_level=True)}"
         if len(players) > 12:
             line += f"\n      ... и ещё {len(players)-12}"
     return line
@@ -822,7 +827,7 @@ def _ru_day(day_str):
         day_str = day_str.replace(en, ru)
     return day_str
 
-def format_results(matches, tournaments, matchi_events=None, title=""):
+def format_results(matches, tournaments, matchi_events=None, title="", following=None):
     """Format results grouped by location, then by date."""
     parts = []
     if title:
@@ -862,7 +867,7 @@ def format_results(matches, tournaments, matchi_events=None, title=""):
             for date_label, evs in date_groups.items():
                 parts.append(f"\n<b>📅 {_ru_day(date_label)}</b> — 🏸 Матчи:")
                 for m in evs[:15]:
-                    parts.append(fmt_match(m))
+                    parts.append(fmt_match(m, following=following))
                 if len(evs) > 15:
                     parts.append(f"  ... и ещё {len(evs)-15}")
 
@@ -873,7 +878,7 @@ def format_results(matches, tournaments, matchi_events=None, title=""):
             for date_label, evs in date_groups.items():
                 parts.append(f"\n<b>📅 {_ru_day(date_label)}</b> — 🏆 Турниры:")
                 for t in evs[:15]:
-                    parts.append(fmt_tournament(t))
+                    parts.append(fmt_tournament(t, following=following))
                 if len(evs) > 15:
                     parts.append(f"  ... и ещё {len(evs)-15}")
 
@@ -1281,8 +1286,10 @@ def _section_rating_kb(u, context, uid):
 
 
 def _section_settings_kb(u, context, uid):
+    cnt = len(u.get("following") or [])
     rows = [
         [InlineKeyboardButton("Статус и параметры", callback_data="show_status")],
+        [InlineKeyboardButton(f"👥 Подписки на игроков ({cnt})", callback_data="follow_menu")],
         [InlineKeyboardButton("Сменить аккаунт Playtomic", callback_data="reset_id")],
         [InlineKeyboardButton("← В меню", callback_data="back_main")],
     ]
@@ -2668,6 +2675,35 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pt_id = parse_playtomic_id(text)
     if not pt_id or "playtomic.io/profile/user/" not in text:
         return
+    # If user already has their own profile linked, treat this as "follow this player"
+    existing = u.get("playtomic_user_id")
+    if existing and existing != pt_id:
+        following = list(u.get("following") or [])
+        names = dict(u.get("follow_names") or {})
+        if pt_id not in following:
+            following.append(pt_id)
+            u["following"] = following
+            # Try to fetch the player's name from Playtomic
+            try:
+                req = urllib.request.Request(
+                    f"https://api.playtomic.io/v2/users/{pt_id}",
+                    headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=6) as r:
+                    pdata = json.loads(r.read())
+                pname = (pdata.get("full_name") or pdata.get("name") or "").strip() or f"Игрок {pt_id}"
+                names[pt_id] = pname
+            except Exception:
+                names[pt_id] = f"Игрок {pt_id}"
+            u["follow_names"] = names
+            set_user(uid, u)
+            await update.message.reply_text(
+                f"✅ Подписался на <b>{names[pt_id]}</b>. Будет выделен жирным в отчётах.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("👥 Открыть подписки", callback_data="follow_menu")]]))
+        else:
+            await update.message.reply_text("Уже подписан.")
+        return
     u["playtomic_user_id"] = pt_id
     # Авто-включаем мониторинг рейтинга (проверка каждые 3 часа)
     try:
@@ -2777,6 +2813,50 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(
             "Аккаунт Playtomic отвязан. Пришли ссылку на новый профиль или нажми “В меню”.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        return
+
+    # ── Following menu ──
+    if data == "follow_menu":
+        following = list(u.get("following") or [])
+        follow_names = u.get("follow_names") or {}
+        if not following:
+            text = ("👥 <b>Подписки на игроков</b>\n\n"
+                    "Пока никого нет. Пришли ссылку на профиль игрока — например "
+                    "<code>https://app.playtomic.io/profile/user/12345</code> — и я добавлю его в подписки.\n\n"
+                    "Игроки в подписках будут выделены жирным в отчётах.")
+            rows = [[InlineKeyboardButton("← Назад", callback_data="sec_settings")]]
+        else:
+            text = "👥 <b>Подписки на игроков</b>\n\nПришли ссылку на профиль, чтобы добавить ещё одного."
+            rows = []
+            for puid in following:
+                pname = follow_names.get(puid) or f"Игрок {puid}"
+                rows.append([
+                    InlineKeyboardButton(f"✎ {pname}",
+                        url=f"https://app.playtomic.io/profile/user/{puid}"),
+                    InlineKeyboardButton("❌", callback_data=f"unfollow_{puid}"),
+                ])
+            rows.append([InlineKeyboardButton("← Назад", callback_data="sec_settings")])
+        await q.edit_message_text(text, parse_mode="HTML",
+                                  reply_markup=InlineKeyboardMarkup(rows),
+                                  disable_web_page_preview=True)
+        return
+
+    if data and data.startswith("unfollow_"):
+        puid = data[len("unfollow_"):]
+        following = list(u.get("following") or [])
+        if puid in following:
+            following.remove(puid)
+            u["following"] = following
+            names = dict(u.get("follow_names") or {})
+            names.pop(puid, None)
+            u["follow_names"] = names
+            set_user(uid, u)
+            await q.answer("Отписан")
+        # Re-render menu
+        await q.message.delete()
+        await context.bot.send_message(q.message.chat_id,
+            "👥 Подписки обновлены",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Открыть", callback_data="follow_menu")]]))
         return
 
     # ── Section submenus ──
@@ -4302,7 +4382,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.info("oneoff result: %d matches, %d tournaments, %d matchi; locations=%s, loc_dates=%s, level=%s-%s, time=%s-%s",
                      len(matches), len(tournaments), len(matchi), w.get("locations"), w.get("loc_dates"),
                      w.get("level_min"), w.get("level_max"), w.get("time_from"), w.get("time_to"))
-            text = format_results(matches, tournaments, matchi, "Результаты разового поиска")
+            text = format_results(matches, tournaments, matchi, "Результаты разового поиска",
+                                  following=set(u.get("following") or []))
             if not (matches or tournaments or matchi):
                 # Покажем фильтры чтобы юзер понял почему
                 ld = w.get("loc_dates", {})
@@ -4336,7 +4417,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = q.message.chat_id
         await q.edit_message_text("🔍 Ищу по всем платформам...", parse_mode="HTML")
         matches, tournaments, matchi = do_search(w)
-        text = format_results(matches, tournaments, matchi, "📊 Результаты поиска")
+        text = format_results(matches, tournaments, matchi, "📊 Результаты поиска",
+                              following=set(u.get("following") or []))
         seen = {}
         for m in matches: seen[event_key(m)] = True
         for t in tournaments: seen[event_key(t)] = True
@@ -4361,7 +4443,8 @@ async def launch_monitoring(q, uid, context, w):
     await q.edit_message_text("🔍 Первый поиск...", parse_mode="HTML")
 
     matches, tournaments, matchi = do_search(w)
-    text = format_results(matches, tournaments, matchi, "📊 Начальный отчёт — все подходящие матчи и турниры")
+    text = format_results(matches, tournaments, matchi, "📊 Начальный отчёт — все подходящие матчи и турниры",
+                          following=set((get_user(uid).get("following")) or []))
 
     u = get_user(uid)
     seen = {}
@@ -4693,7 +4776,8 @@ async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
     set_user(uid, u)
 
     if new_m or new_t or new_mc:
-        text = format_results(new_m, new_t, new_mc, "🆕 Новые события")
+        text = format_results(new_m, new_t, new_mc, "🆕 Новые события",
+                              following=set((get_user(uid).get("following")) or []))
         for chunk in split_message(text):
             await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
 
