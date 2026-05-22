@@ -4239,10 +4239,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # wiz_begin: мягкий — если визард уже есть, режим редактирования, история сохраняется.
     # wiz_restart: полный сброс (явный выбор «Перенастроить с нуля»).
     if data == "wiz_restart":
+        # Preserve daily_windows / daily_exclude across full wizard reset —
+        # the user expects the window/exclusion list to survive a 'with nuля'
+        # rerun of the location/level/etc setup.
+        prev_w = u.get("wizard") or {}
+        keep_daily = prev_w.get("daily_windows") or {}
+        keep_excl  = prev_w.get("daily_exclude") or {}
         u["wizard"] = None
         u["seen_events"] = {}
         set_user(uid, u)
         u = wiz(uid)
+        if keep_daily or keep_excl:
+            u["wizard"]["daily_windows"] = keep_daily
+            u["wizard"]["daily_exclude"] = keep_excl
+            set_user(uid, u)
         await show_step(q, uid, context)
         return
     if data == "wiz_back":
