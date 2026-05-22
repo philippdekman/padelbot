@@ -4215,6 +4215,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u_now = get_user(uid)
         u_now["_wizard_backup"] = u_now.get("wizard")
         u_now["oneoff_active"] = True
+        # Inherit daily windows/excludes from the main wizard so the oneoff
+        # search sees the same date+time filters.
+        prev_w = u_now.get("wizard") or {}
+        inherit_daily = dict(prev_w.get("daily_windows") or {})
+        inherit_excl  = dict(prev_w.get("daily_exclude") or {})
         u_now["wizard"] = {
             "step": "location",
             "locations": [],
@@ -4230,6 +4235,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "time_to_h": 22, "time_to_m": 0,
             "frequency": 60, "dates_sub": None,
             "oneoff": True,
+            "daily_windows": inherit_daily,
+            "daily_exclude": inherit_excl,
         }
         set_user(uid, u_now)
         await show_step(q, uid, context)
@@ -4536,7 +4543,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
             # Восстанавливаем оригинальные настройки мониторинга
             u_now = get_user(uid)
-            u_now["wizard"] = u_now.pop("_wizard_backup", None)
+            # Restore backup, but PRESERVE any daily_windows/daily_exclude
+            # the user edited during the oneoff session so changes aren't lost.
+            oneoff_w = u_now.get("wizard") or {}
+            new_daily = oneoff_w.get("daily_windows") or {}
+            new_excl  = oneoff_w.get("daily_exclude") or {}
+            restored = u_now.pop("_wizard_backup", None) or {}
+            if new_daily:
+                restored["daily_windows"] = new_daily
+            if new_excl:
+                restored["daily_exclude"] = new_excl
+            u_now["wizard"] = restored
             u_now["oneoff_active"] = False
             set_user(uid, u_now)
             await context.bot.send_message(chat_id, "Разовый поиск завершён. Настройки мониторинга сохранены.",
