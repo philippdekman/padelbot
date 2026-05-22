@@ -3060,6 +3060,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     InlineKeyboardButton("❌ Убрать", callback_data=f"daily_clr_{d}"),
                 ])
             text = "\n".join(lines)
+        if all_dates:
+            rows.append([InlineKeyboardButton("🔍 Найти сейчас по этим окнам", callback_data="daily_search_now")])
         rows.append([InlineKeyboardButton("+ Добавить день", callback_data="daily_add")])
         rows.append([InlineKeyboardButton("📆 Диапазон дат + общее окно", callback_data="daily_range")])
         rows.append([InlineKeyboardButton("Быстро: вечер на 3 дня", callback_data="daily_quick_evening3")])
@@ -3195,6 +3197,31 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("← В меню", callback_data="back_main")]]
         await q.edit_message_text("\n".join(lines), parse_mode="HTML",
                                   reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data == "daily_search_now":
+        chat_id = q.message.chat_id
+        await q.edit_message_text("🔍 Ищу по всем вашим дням и окнам...",
+            parse_mode="HTML")
+        w = u.get("wizard") or {}
+        matches, tournaments, matchi = do_search(w)
+        seen = u.get("seen_events") or {}
+        for m in matches: seen[event_key(m)] = True
+        for t in tournaments: seen[event_key(t)] = True
+        for mc in matchi: seen[event_key(mc)] = True
+        u["seen_events"] = seen
+        set_user(uid, u)
+        text = format_results(matches, tournaments, matchi,
+            "📊 Найденные события по твоим окнам",
+            following=set(u.get("following") or []))
+        if not (matches or tournaments or matchi):
+            text = "Ничего не найдено по текущим окнам и фильтрам."
+        for chunk in split_message(text):
+            await context.bot.send_message(chat_id, chunk, parse_mode="HTML",
+                disable_web_page_preview=True)
+        await context.bot.send_message(chat_id, "Готово. Новые события отмечены как виденные.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("← К окнам по дням", callback_data="daily_menu")]]))
         return
 
     if data == "daily_quick_evening3":
