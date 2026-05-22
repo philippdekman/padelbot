@@ -2822,23 +2822,110 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not following:
             text = ("👥 <b>Подписки на игроков</b>\n\n"
                     "Пока никого нет. Пришли ссылку на профиль игрока — например "
-                    "<code>https://app.playtomic.io/profile/user/12345</code> — и я добавлю его в подписки.\n\n"
+                    "<code>https://app.playtomic.io/profile/user/12345</code> — или нажми «Частые партнёры» ниже.\n\n"
                     "Игроки в подписках будут выделены жирным в отчётах.")
-            rows = [[InlineKeyboardButton("← Назад", callback_data="sec_settings")]]
         else:
-            text = "👥 <b>Подписки на игроков</b>\n\nПришли ссылку на профиль, чтобы добавить ещё одного."
-            rows = []
-            for puid in following:
-                pname = follow_names.get(puid) or f"Игрок {puid}"
-                rows.append([
-                    InlineKeyboardButton(f"✎ {pname}",
-                        url=f"https://app.playtomic.io/profile/user/{puid}"),
-                    InlineKeyboardButton("❌", callback_data=f"unfollow_{puid}"),
-                ])
-            rows.append([InlineKeyboardButton("← Назад", callback_data="sec_settings")])
+            text = "👥 <b>Подписки на игроков</b>\n\nПришли ссылку на профиль или открой «Частые партнёры»."
+        rows = []
+        for puid in following:
+            pname = follow_names.get(puid) or f"Игрок {puid}"
+            rows.append([
+                InlineKeyboardButton(f"✎ {pname}",
+                    url=f"https://app.playtomic.io/profile/user/{puid}"),
+                InlineKeyboardButton("❌", callback_data=f"unfollow_{puid}"),
+            ])
+        rows.append([InlineKeyboardButton("✨ Частые партнёры из истории", callback_data="follow_suggest")])
+        rows.append([InlineKeyboardButton("← Назад", callback_data="sec_settings")])
         await q.edit_message_text(text, parse_mode="HTML",
                                   reply_markup=InlineKeyboardMarkup(rows),
                                   disable_web_page_preview=True)
+        return
+
+    if data == "follow_suggest":
+        pt_id = u.get("playtomic_user_id")
+        if not pt_id:
+            await q.answer("Сначала привяжи свой профиль")
+            return
+        try:
+            ms = rating.fetch_user_matches(pt_id)
+        except Exception:
+            ms = []
+        from collections import Counter
+        cnt = Counter(); pn = {}
+        for m in ms:
+            for t in m.get("teams", []):
+                for p in t.get("players", []):
+                    puid = p.get("user_id")
+                    if puid and puid != pt_id:
+                        cnt[puid] += 1
+                        nm = (p.get("name") or p.get("full_name") or "").strip()
+                        if nm: pn[puid] = nm
+        following = set(u.get("following") or [])
+        suggestions = [(puid, n) for puid, n in cnt.most_common(20) if puid not in following]
+        rows = []
+        for puid, n in suggestions[:12]:
+            label = f"{pn.get(puid, '?')[:25]} — {n} матч."
+            rows.append([InlineKeyboardButton("+ " + label, callback_data=f"followadd_{puid}")])
+        if not rows:
+            await q.edit_message_text("Нет новых частых партнёров.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="follow_menu")]]))
+            return
+        rows.append([InlineKeyboardButton("← Назад", callback_data="follow_menu")])
+        await q.edit_message_text(
+            "✨ <b>Частые партнёры</b> — по истории твоих матчей\n\nТап на игрока — добавит в подписки.",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data and data.startswith("followadd_"):
+        puid = data[len("followadd_"):]
+        following = list(u.get("following") or [])
+        names = dict(u.get("follow_names") or {})
+        if puid not in following:
+            following.append(puid); u["following"] = following
+            try:
+                req = urllib.request.Request(
+                    f"https://api.playtomic.io/v2/users/{puid}",
+                    headers={"User-Agent":"Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=6) as r:
+                    pdata = json.loads(r.read())
+                names[puid] = (pdata.get("full_name") or pdata.get("name") or f"Игрок {puid}").strip()
+            except Exception:
+                names.setdefault(puid, f"Игрок {puid}")
+            u["follow_names"] = names
+            set_user(uid, u)
+            await q.answer(f"✅ {names[puid]}", show_alert=False)
+        else:
+            await q.answer("Уже подписан")
+        # Re-render suggestions
+        context_data_q = type("X", (), {"data": "follow_suggest"})()
+        # Recursive reuse: just edit to suggestions screen by simulating call via internal trigger
+        # Cheaper: simply re-call the same logic by editing message text
+        from collections import Counter
+        u = get_user(uid)
+        pt_id = u.get("playtomic_user_id")
+        try:
+            ms = rating.fetch_user_matches(pt_id) if pt_id else []
+        except Exception:
+            ms = []
+        cnt = Counter(); pn = {}
+        for m in ms:
+            for t in m.get("teams", []):
+                for p in t.get("players", []):
+                    p_uid = p.get("user_id")
+                    if p_uid and p_uid != pt_id:
+                        cnt[p_uid] += 1
+                        nm = (p.get("name") or p.get("full_name") or "").strip()
+                        if nm: pn[p_uid] = nm
+        following_set = set(u.get("following") or [])
+        suggestions = [(p_uid, n) for p_uid, n in cnt.most_common(20) if p_uid not in following_set]
+        rows = []
+        for p_uid, n in suggestions[:12]:
+            label = f"{pn.get(p_uid, '?')[:25]} — {n} матч."
+            rows.append([InlineKeyboardButton("+ " + label, callback_data=f"followadd_{p_uid}")])
+        rows.append([InlineKeyboardButton("← К подпискам", callback_data="follow_menu")])
+        await q.edit_message_text(
+            "✨ <b>Частые партнёры</b>\n\nТап на игрока — добавит в подписки.",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
         return
 
     if data and data.startswith("unfollow_"):
