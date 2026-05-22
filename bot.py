@@ -392,19 +392,18 @@ def filter_matches(matches, cfg, loc_dates):
             except Exception:
                 pass
 
-        # Joined-player level check: if any current player is far below the
-        # user's minimum level, hide the match. "Far below" = more than 0.5
-        # below user's level_min. This complements the organizer-set range
-        # check, which can be wide and let very weak players in.
+        # Joined-player level check: every joined player must be at or above
+        # user's level_min. Even one weaker player kills the match — you don't
+        # want to play with someone below your floor.
         if level_min is not None:
             try:
                 user_min = float(level_min)
-                threshold = user_min - 0.5
+                eps = 0.01
                 joined_levels = [float(p["level_value"])
                                  for team in m.get("teams", [])
                                  for p in team.get("players", [])
                                  if p.get("level_value") is not None]
-                if joined_levels and min(joined_levels) < threshold:
+                if joined_levels and min(joined_levels) < user_min - eps:
                     continue
             except Exception:
                 pass
