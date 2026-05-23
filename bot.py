@@ -3289,6 +3289,47 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         today = datetime.utcnow().date()
         rows = []
         DAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+        def _win_summary(windows):
+            if not windows:
+                return ""
+            parts = []
+            for w_ in windows:
+                if w_ == "07:00-23:00":
+                    parts.append("весь день")
+                elif w_ == "07:00-12:00":
+                    parts.append("утро")
+                elif w_ == "12:00-17:00":
+                    parts.append("день")
+                elif w_ == "17:00-23:00":
+                    parts.append("вечер")
+                elif w_ == "19:00-23:00":
+                    parts.append("поздний вечер")
+                else:
+                    parts.append(w_)
+            return ", ".join(parts)
+
+        # Header summary of currently configured days
+        header_lines = ["<b>Выбери день</b>  <i>✅ в мониторинге · 🚫 исключён</i>"]
+        all_dates = sorted(set(list(daily.keys()) + list(excl.keys())))
+        if all_dates:
+            header_lines.append("")
+            header_lines.append("<b>Настроено:</b>")
+            for k in all_dates:
+                try:
+                    dt = datetime.strptime(k, "%Y-%m-%d")
+                    ds = f"{DAY_RU[dt.weekday()]} {dt.strftime('%d.%m')}"
+                except Exception:
+                    ds = k
+                inc_s = _win_summary(daily.get(k, []))
+                exc_v = excl.get(k)
+                exc_s = ("весь день" if exc_v == [] else _win_summary(exc_v)) if exc_v is not None else ""
+                bits = []
+                if inc_s: bits.append(f"✅ {inc_s}")
+                if exc_s: bits.append(f"🚫 {exc_s}")
+                header_lines.append(f"• {ds}: " + " | ".join(bits))
+        header = "\n".join(header_lines)
+
         for off in range(0, 21):
             d = today + timedelta(days=off)
             key = d.isoformat()
@@ -3307,9 +3348,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i in range(0, len(rows), 2):
             grouped.append(rows[i] + (rows[i+1] if i+1 < len(rows) else []))
         grouped.append([InlineKeyboardButton("← Назад", callback_data="daily_menu")])
-        await q.edit_message_text(
-            "Выбери день (✅ — в мониторинге, 🚫 — исключён):",
-            reply_markup=InlineKeyboardMarkup(grouped))
+        await q.edit_message_text(header, parse_mode="HTML",
+                                  reply_markup=InlineKeyboardMarkup(grouped))
         return
 
     if data and data.startswith("daily_d_"):
