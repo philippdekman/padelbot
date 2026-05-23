@@ -3227,6 +3227,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "daily_quick_evening3":
+        log.info("DAILY_QUICK3_BEFORE uid=%s wizard_keys=%s",
+                 uid, list((u.get("wizard") or {}).keys()))
         # Add "17:00-23:00" to the next 3 days (today+1..+3)
         w = u.setdefault("wizard", {}) or u["wizard"]
         daily = w.setdefault("daily_windows", {})
@@ -3312,6 +3314,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data and data.startswith("daily_d_"):
         date_key = data[len("daily_d_"):]
+        log.info("DAILY_OPEN_DAY uid=%s date=%s wizard_present=%s daily_keys=%s",
+                 uid, date_key, bool(u.get("wizard")),
+                 list(((u.get("wizard") or {}).get("daily_windows") or {}).keys()))
         await _render_day_editor(q, u, date_key, msg="", mode="include")
         return
 
