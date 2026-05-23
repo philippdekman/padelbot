@@ -3033,6 +3033,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         w = u.get("wizard") or {}
         daily = w.get("daily_windows") or {}
         excl = w.get("daily_exclude") or {}
+        log.info("DAILY_MENU uid=%s daily_keys=%s exclude_keys=%s wizard_present=%s",
+                 uid, list(daily.keys()), list(excl.keys()), bool(u.get("wizard")))
         DAY_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
         all_dates = sorted(set(list(daily.keys()) + list(excl.keys())))
         rows = []
@@ -3398,8 +3400,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             store.pop(date_key, None)
         set_user(uid, u)
+        # Verify what actually got persisted
+        verify = get_user(uid)
+        v_w = verify.get("wizard") or {}
+        v_store = v_w.get(store_key) or {}
+        log.info("DAILY_%s uid=%s date=%s window=%s post_save_keys=%s post_save_for_date=%s",
+                 store_key, uid, date_key, window, list(v_store.keys()), v_store.get(date_key))
         await q.answer(msg.split(" — ")[0], show_alert=False)
-        await _render_day_editor(q, get_user(uid), date_key, msg=msg,
+        await _render_day_editor(q, verify, date_key, msg=msg,
                                  mode="exclude" if is_exclude else "include")
         return
 
