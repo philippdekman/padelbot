@@ -4651,8 +4651,12 @@ async def launch_monitoring(q, uid, context, w):
     u["chat_id"] = chat_id  # store for restart recovery
     set_user(uid, u)
 
-    for chunk in split_message(text):
-        await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
+    chunks = split_message(text)
+    for i, chunk in enumerate(chunks):
+        kb = (InlineKeyboardMarkup([[InlineKeyboardButton("🕐 Что мониторится", callback_data="status_check")]])
+              if i == len(chunks) - 1 else None)
+        await context.bot.send_message(chat_id, chunk, parse_mode="HTML",
+                                       disable_web_page_preview=True, reply_markup=kb)
 
     freq_sec = w.get("frequency", 60) * 60
     context.job_queue.run_repeating(
@@ -4973,8 +4977,12 @@ async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
     if new_m or new_t or new_mc:
         text = format_results(new_m, new_t, new_mc, "🆕 Новые события",
                               following=set((get_user(uid).get("following")) or []))
-        for chunk in split_message(text):
-            await context.bot.send_message(chat_id, chunk, parse_mode="HTML", disable_web_page_preview=True)
+        chunks = split_message(text)
+        for i, chunk in enumerate(chunks):
+            kb = (InlineKeyboardMarkup([[InlineKeyboardButton("🕐 Что мониторится", callback_data="status_check")]])
+                  if i == len(chunks) - 1 else None)
+            await context.bot.send_message(chat_id, chunk, parse_mode="HTML",
+                                           disable_web_page_preview=True, reply_markup=kb)
 
     if freed_matches:
         await context.bot.send_message(chat_id, "<b>Освободилось место</b>", parse_mode="HTML")
