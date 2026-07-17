@@ -109,36 +109,41 @@ def mark_added(uid: int, mid: str):
         set_user(uid, u)
 
 # ─── HTTP helpers ───────────────────────────────────────────────────
-# Playtomic блокирует IP датацентров (CloudFront WAF), поэтому все запросы
-# ко API делаем через residential proxy. Два способа подключения:
-#   1) SCRAPERAPI_KEY — оборачиваем URL в https://api.scraperapi.com/?api_key=...&url=...
-#      (более простой путь, та же схема, что в cellartracker-bot)
-#   2) HTTPS_PROXY / HTTP_PROXY — urllib автоматически читает env
-_SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY", "").strip()
-_SCRAPERAPI_URL = "https://api.scraperapi.com/"
+# Playtomic блокирует IP датацентров (CloudFront WAF), поэтому все запросы к
+# api.playtomic.io гоняем через residential proxy (IPRoyal).
+# Используем кастомное имя env-переменной чтобы Railway builder (mise/pip) не
+# пытался качать через неё свои зависимости — HTTPS_PROXY/HTTP_PROXY ломает билд.
+_PLAYTOMIC_PROXY = os.environ.get("PLAYTOMIC_PROXY", "").strip()
 
-def _wrap_url(url: str) -> str:
-    """Оборачивает target-URL в ScraperAPI-фасад если SCRAPERAPI_KEY задан."""
-    if not _SCRAPERAPI_KEY:
-        return url
-    # только Playtomic через proxy — Telegram и другие ходят напрямую
-    if "playtomic.io" not in url:
-        return url
-    from urllib.parse import quote_plus
-    return f"{_SCRAPERAPI_URL}?api_key={_SCRAPERAPI_KEY}&url={quote_plus(url)}"
+_playtomic_opener = None
+def _get_playtomic_opener():
+    global _playtomic_opener
+    if _playtomic_opener is not None or not _PLAYTOMIC_PROXY:
+        return _playtomic_opener
+    handler = urllib.request.ProxyHandler({
+        "http":  _PLAYTOMIC_PROXY,
+        "https": _PLAYTOMIC_PROXY,
+    })
+    _playtomic_opener = urllib.request.build_opener(handler)
+    return _playtomic_opener
 
 def api_get(url: str, timeout: int = 20):
-    wrapped = _wrap_url(url)
-    # ScraperAPI сам держит до ~70s, таймаут расширяем если через него
-    if wrapped != url:
-        timeout = max(timeout, 70)
-    req = urllib.request.Request(wrapped, headers={
+    is_playtomic = "playtomic.io" in url
+    opener = _get_playtomic_opener() if is_playtomic else None
+    # Residential proxy медленнее, даём больше времени
+    if opener is not None:
+        timeout = max(timeout, 45)
+    req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (compatible; PadelBot/2.0)",
         "Accept": "application/json",
     })
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())
+        if opener is not None:
+            r = opener.open(req, timeout=timeout)
+        else:
+            r = urllib.request.urlopen(req, timeout=timeout)
+        with r as resp:
+            return json.loads(resp.read())
     except Exception as e:
         log.warning("API error %s: %s", url[:100], e)
         return None
