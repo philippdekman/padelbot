@@ -113,37 +113,53 @@ def mark_added(uid: int, mid: str):
 # api.playtomic.io гоняем через residential proxy (IPRoyal).
 # Используем кастомное имя env-переменной чтобы Railway builder (mise/pip) не
 # пытался качать через неё свои зависимости — HTTPS_PROXY/HTTP_PROXY ломает билд.
-_PLAYTOMIC_PROXY = os.environ.get("PLAYTOMIC_PROXY", "").strip()
+# Прокси задаётся 3 отдельными env, чтобы спецсимволы в username (запятые для country)
+# не ломали URL-парсер. Авторизация — вручную через Proxy-Authorization header.
+_PROXY_HOST = os.environ.get("PLAYTOMIC_PROXY_HOST", "").strip()
+_PROXY_PORT = os.environ.get("PLAYTOMIC_PROXY_PORT", "").strip()
+_PROXY_USER = os.environ.get("PLAYTOMIC_PROXY_USER", "").strip()
+_PROXY_PASS = os.environ.get("PLAYTOMIC_PROXY_PASS", "").strip()
 
-_playtomic_opener = None
-def _get_playtomic_opener():
-    global _playtomic_opener
-    if _playtomic_opener is not None or not _PLAYTOMIC_PROXY:
-        return _playtomic_opener
-    handler = urllib.request.ProxyHandler({
-        "http":  _PLAYTOMIC_PROXY,
-        "https": _PLAYTOMIC_PROXY,
-    })
-    _playtomic_opener = urllib.request.build_opener(handler)
-    return _playtomic_opener
+# httpx уже есть как транзитивная зависимость python-telegram-bot; он аккуратно
+# обрабатывает прокси-авторизацию (вкл. спецсимволы в логине) в CONNECT-туннелях.
+try:
+    import httpx as _httpx
+except ImportError:
+    _httpx = None
+
+_playtomic_client = None
+def _get_playtomic_client():
+    global _playtomic_client
+    if _playtomic_client is not None:
+        return _playtomic_client
+    if not (_PROXY_HOST and _PROXY_PORT and _httpx):
+        return None
+    auth = None
+    if _PROXY_USER and _PROXY_PASS:
+        auth = (_PROXY_USER, _PROXY_PASS)
+    proxy = _httpx.Proxy(url=f"http://{_PROXY_HOST}:{_PROXY_PORT}", auth=auth)
+    _playtomic_client = _httpx.Client(proxy=proxy, timeout=60.0,
+                                      headers={"User-Agent": "Mozilla/5.0 (compatible; PadelBot/2.0)",
+                                               "Accept": "application/json"})
+    return _playtomic_client
 
 def api_get(url: str, timeout: int = 20):
     is_playtomic = "playtomic.io" in url
-    opener = _get_playtomic_opener() if is_playtomic else None
-    # Residential proxy медленнее, даём больше времени
-    if opener is not None:
-        timeout = max(timeout, 45)
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (compatible; PadelBot/2.0)",
-        "Accept": "application/json",
-    })
+    client = _get_playtomic_client() if is_playtomic else None
     try:
-        if opener is not None:
-            r = opener.open(req, timeout=timeout)
-        else:
-            r = urllib.request.urlopen(req, timeout=timeout)
-        with r as resp:
-            return json.loads(resp.read())
+        if client is not None:
+            r = client.get(url, timeout=max(timeout, 45))
+            if r.status_code >= 400:
+                log.warning("API error %s: HTTP %s", url[:100], r.status_code)
+                return None
+            return r.json()
+        # fallback — прямой запрос без прокси
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; PadelBot/2.0)",
+            "Accept": "application/json",
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
     except Exception as e:
         log.warning("API error %s: %s", url[:100], e)
         return None
