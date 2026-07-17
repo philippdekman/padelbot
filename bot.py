@@ -1235,14 +1235,18 @@ def _section_search_kb(u, context, uid):
     has_wizard = bool(u.get("wizard"))
     search_on = bool(context.job_queue.get_jobs_by_name(f"watch_{uid}"))
     rows = []
+    if has_wizard:
+        # Самая видная кнопка — быстрый поиск прямо сейчас без возни с визардом.
+        rows.append([InlineKeyboardButton("🔍 Найти сейчас", callback_data="daily_search_now")])
     if has_wizard and not search_on:
-        rows.append([InlineKeyboardButton("▶ Возобновить поиск", callback_data="resume_search")])
+        rows.append([InlineKeyboardButton("▶ Включить мониторинг", callback_data="resume_search")])
     if has_wizard and search_on:
-        rows.append([InlineKeyboardButton("Перенастроить поиск", callback_data="wiz_begin"),
+        rows.append([InlineKeyboardButton("Перенастроить", callback_data="wiz_begin"),
                      InlineKeyboardButton("⏹ Остановить", callback_data="stop_monitoring")])
     elif not has_wizard:
         rows.append([InlineKeyboardButton("Настроить постоянный поиск игр", callback_data="wiz_begin")])
     if has_wizard:
+        rows.append([InlineKeyboardButton("📅 Даты поиска", callback_data="wiz_edit_dates")])
         rows.append([InlineKeyboardButton("Время по дням (окна/исключения)", callback_data="daily_menu")])
     rows.append([InlineKeyboardButton("Разовый поиск (без мониторинга)", callback_data="oneoff_begin")])
     rows.append([InlineKeyboardButton("Сбросить отметки «добавлено»", callback_data="reset_added")])
