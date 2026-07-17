@@ -3534,27 +3534,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_main_menu_kb(u, context, uid))
         return
 
-    # ── Resume search monitoring (without reset) ──
+    # ── Resume search monitoring ──
+    # Включение после остановки — полноценный fresh-старт, чтобы старые seen_events
+    # с прошлой сессии не скрывали текущие матчи. Сбрасываем историю уведомлений
+    # и вызываем launch_monitoring — он пришлёт начальный отчёт и запланирует job.
     if data == "resume_search":
         w = u.get("wizard")
         if not w:
             await q.edit_message_text("Настройки поиска не найдены. Нажми «Настроить поиск игр».",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
             return
-        chat_id = q.message.chat_id
-        u["monitoring_active"] = True
-        u["chat_id"] = chat_id
+        # Сброс истории уведомлений — чтобы при включении был полный отчёт.
+        u["seen_events"] = {}
+        u["seen_full_matches"] = []
         set_user(uid, u)
-        for job in context.job_queue.get_jobs_by_name(f"watch_{uid}"):
-            job.schedule_removal()
-        freq_sec = w.get("frequency", 60) * 60
-        context.job_queue.run_repeating(
-            watch_tick, interval=freq_sec, first=10,
-            name=f"watch_{uid}", data={"uid": uid, "chat_id": chat_id},
-        )
-        await q.edit_message_text(
-            f"Поиск возобновлён. Проверка каждые {w.get('frequency', 60)} мин.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
+        await launch_monitoring(q, uid, context, w)
         return
 
     # ── My account watch toggle ──
