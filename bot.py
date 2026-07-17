@@ -2961,6 +2961,25 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── Monitoring status ──
+    if data == "reset_seen":
+        u["seen_events"] = {}
+        u["seen_full_matches"] = []
+        set_user(uid, u)
+        await q.answer("История очищена. Следующий тик watcher’а покажет всё как новое.", show_alert=True)
+        return
+
+    if data == "wiz_edit_dates":
+        # Быстрый возврат к выбору дат — чистим loc_dates и проводим по каждой локации.
+        w = u.get("wizard") or {}
+        if not w.get("locations"):
+            await q.answer("Сначала настрой локации", show_alert=True)
+            return
+        w["loc_dates"] = {}
+        w["step"] = "dates"
+        set_user(uid, u)
+        await show_step(q, uid, context)
+        return
+
     if data == "status_check":
         jq = context.job_queue
         def jobs(name):
@@ -3002,6 +3021,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             daily = w.get("daily_windows") or {}
             lines.append("\n<b>Фильтры:</b>")
             lines.append(f"• Локации: {locs}")
+            # Даты поиска по каждой локации
+            loc_dates_all = w.get("loc_dates") or {}
+            for ln in w.get("locations", []):
+                ld = loc_dates_all.get(ln) or {}
+                df, dt_ = ld.get("from"), ld.get("to")
+                def _fmt_d(s):
+                    try: return datetime.strptime(s, "%Y-%m-%d").strftime("%d.%m.%Y")
+                    except Exception: return s or "?"
+                if df or dt_:
+                    lines.append(f"• Даты ({ln}): {_fmt_d(df)} → {_fmt_d(dt_)}")
+                else:
+                    lines.append(f"• Даты ({ln}): <b>не заданы</b> (ищет всё)")
             lines.append(f"• Радиус: {w.get('radius', 10)} км")
             lines.append(f"• Уровень: {lvl}")
             if daily:
@@ -3023,6 +3054,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = []
         if not search_jobs and w.get("locations"):
             rows.append([InlineKeyboardButton("▶️ Запустить поиск матчей", callback_data="wiz_go")])
+        if w.get("locations"):
+            rows.append([InlineKeyboardButton("📅 Изменить даты", callback_data="wiz_edit_dates")])
+            seen_count = len(u.get("seen_events") or {})
+            rows.append([InlineKeyboardButton(
+                f"🔄 Сбросить историю уведомлений ({seen_count})",
+                callback_data="reset_seen"
+            )])
         rows.append([InlineKeyboardButton("← В меню", callback_data="back_main")])
         await q.edit_message_text(text, parse_mode="HTML",
                                   reply_markup=InlineKeyboardMarkup(rows))
