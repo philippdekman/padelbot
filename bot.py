@@ -109,8 +109,30 @@ def mark_added(uid: int, mid: str):
         set_user(uid, u)
 
 # ─── HTTP helpers ───────────────────────────────────────────────────
+# Playtomic блокирует IP датацентров (CloudFront WAF), поэтому все запросы
+# ко API делаем через residential proxy. Два способа подключения:
+#   1) SCRAPERAPI_KEY — оборачиваем URL в https://api.scraperapi.com/?api_key=...&url=...
+#      (более простой путь, та же схема, что в cellartracker-bot)
+#   2) HTTPS_PROXY / HTTP_PROXY — urllib автоматически читает env
+_SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY", "").strip()
+_SCRAPERAPI_URL = "https://api.scraperapi.com/"
+
+def _wrap_url(url: str) -> str:
+    """Оборачивает target-URL в ScraperAPI-фасад если SCRAPERAPI_KEY задан."""
+    if not _SCRAPERAPI_KEY:
+        return url
+    # только Playtomic через proxy — Telegram и другие ходят напрямую
+    if "playtomic.io" not in url:
+        return url
+    from urllib.parse import quote_plus
+    return f"{_SCRAPERAPI_URL}?api_key={_SCRAPERAPI_KEY}&url={quote_plus(url)}"
+
 def api_get(url: str, timeout: int = 20):
-    req = urllib.request.Request(url, headers={
+    wrapped = _wrap_url(url)
+    # ScraperAPI сам держит до ~70s, таймаут расширяем если через него
+    if wrapped != url:
+        timeout = max(timeout, 70)
+    req = urllib.request.Request(wrapped, headers={
         "User-Agent": "Mozilla/5.0 (compatible; PadelBot/2.0)",
         "Accept": "application/json",
     })
@@ -2687,13 +2709,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if pt_id not in following:
             following.append(pt_id)
             u["following"] = following
-            # Try to fetch the player's name from Playtomic
+            # Try to fetch the player's name from Playtomic (через api_get — proxy-aware)
             try:
-                req = urllib.request.Request(
-                    f"https://api.playtomic.io/v2/users/{pt_id}",
-                    headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=6) as r:
-                    pdata = json.loads(r.read())
+                pdata = api_get(f"https://api.playtomic.io/v2/users/{pt_id}", timeout=10) or {}
                 pname = (pdata.get("full_name") or pdata.get("name") or "").strip() or f"Игрок {pt_id}"
                 names[pt_id] = pname
             except Exception:
@@ -2887,11 +2905,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if puid not in following:
             following.append(puid); u["following"] = following
             try:
-                req = urllib.request.Request(
-                    f"https://api.playtomic.io/v2/users/{puid}",
-                    headers={"User-Agent":"Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=6) as r:
-                    pdata = json.loads(r.read())
+                pdata = api_get(f"https://api.playtomic.io/v2/users/{puid}", timeout=10) or {}
                 names[puid] = (pdata.get("full_name") or pdata.get("name") or f"Игрок {puid}").strip()
             except Exception:
                 names.setdefault(puid, f"Игрок {puid}")
