@@ -134,13 +134,19 @@ def _get_playtomic_client():
         return _playtomic_client
     if not (_PROXY_HOST and _PROXY_PORT and _httpx):
         return None
-    auth = None
+    # httpx.URL(username=..., password=...) — корректно экранирует спецсимволы
+    proxy_kwargs = {"scheme": "http", "host": _PROXY_HOST, "port": int(_PROXY_PORT)}
     if _PROXY_USER and _PROXY_PASS:
-        auth = (_PROXY_USER, _PROXY_PASS)
-    proxy = _httpx.Proxy(url=f"http://{_PROXY_HOST}:{_PROXY_PORT}", auth=auth)
-    _playtomic_client = _httpx.Client(proxy=proxy, timeout=60.0,
-                                      headers={"User-Agent": "Mozilla/5.0 (compatible; PadelBot/2.0)",
-                                               "Accept": "application/json"})
+        proxy_kwargs["username"] = _PROXY_USER
+        proxy_kwargs["password"] = _PROXY_PASS
+    proxy_url = _httpx.URL(**proxy_kwargs)
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; PadelBot/2.0)",
+               "Accept": "application/json"}
+    # httpx <0.28 использует proxies=, ≥ 0.28 — proxy=. Пробуем оба.
+    try:
+        _playtomic_client = _httpx.Client(proxies=proxy_url, timeout=60.0, headers=headers)
+    except TypeError:
+        _playtomic_client = _httpx.Client(proxy=proxy_url, timeout=60.0, headers=headers)
     return _playtomic_client
 
 def api_get(url: str, timeout: int = 20):
