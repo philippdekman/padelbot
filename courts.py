@@ -19,32 +19,27 @@
 }
 """
 from __future__ import annotations
-import json, urllib.request, logging
+import logging
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from typing import Optional
 
-log = logging.getLogger(__name__)
+import playtomic_api
+from playtomic_api import PlaytomicError
 
-PT_BASE = "https://api.playtomic.io/v1"
+log = logging.getLogger(__name__)
 
 
 # ─── Playtomic availability ────────────────────────────────────────
 def fetch_availability(tenant_id: str, day: date) -> list:
-    """Returns list of resources with slots for that day. Empty on error."""
-    url = (f"{PT_BASE}/availability?sport_id=PADEL&tenant_id={tenant_id}"
-           f"&start_min={day.isoformat()}T00:00:00"
-           f"&start_max={day.isoformat()}T23:59:59")
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json",
+    """Returns list of resources with slots for that day.
+    Raises PlaytomicError on failure."""
+    data = playtomic_api.get("/v1/availability", params={
+        "sport_id": "PADEL", "tenant_id": tenant_id,
+        "start_min": f"{day.isoformat()}T00:00:00",
+        "start_max": f"{day.isoformat()}T23:59:59",
     })
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return json.loads(r.read())
-    except Exception as e:
-        log.warning("availability fetch failed for %s %s: %s", tenant_id, day, e)
-        return []
+    return data if isinstance(data, list) else []
 
 
 def book_url(tenant_id: str, day: date, start_time: str, duration: int) -> str:

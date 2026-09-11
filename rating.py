@@ -5,24 +5,23 @@
 рейтинг игрока на момент матча. Берём по дате старта.
 """
 from __future__ import annotations
-import urllib.request, urllib.error, json, logging
+import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
-log = logging.getLogger(__name__)
+import playtomic_api
+from playtomic_api import PlaytomicError
 
-PT_BASE = "https://api.playtomic.io/v1"
+log = logging.getLogger(__name__)
 
 
 def fetch_user_matches(pt_id: str) -> list:
-    url = f"{PT_BASE}/matches?sport_id=PADEL&user_id={pt_id}&size=100"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return json.loads(r.read())
-    except Exception as e:
-        log.warning("fetch_user_matches failed: %s", e)
-        return []
+    """Raises PlaytomicError on failure — callers must not treat that as
+    \"no matches\", it silently corrupted rating history before."""
+    data = playtomic_api.get("/v1/matches", params={
+        "sport_id": "PADEL", "user_id": pt_id, "size": 100,
+    })
+    return data if isinstance(data, list) else []
 
 
 # Statuses where the player's level_value is the post-match rating snapshot.

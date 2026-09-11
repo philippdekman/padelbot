@@ -9,6 +9,8 @@ import io, json, os, urllib.request, logging, hashlib
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
 
+import playtomic_api
+
 _FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 _NOTO_PATH = os.path.join(_FONT_DIR, "NotoSans-Regular.ttf")
 
@@ -25,15 +27,12 @@ def _fetch_profile_picture(user_id: str) -> str | None:
     if user_id in _PROFILE_CACHE:
         return _PROFILE_CACHE[user_id]
     try:
-        req = urllib.request.Request(
-            f"https://api.playtomic.io/v2/users/{user_id}",
-            headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=6) as r:
-            data = json.loads(r.read())
+        data = playtomic_api.get(f"/v2/users/{user_id}") or {}
         url = data.get("picture") or None
         _PROFILE_CACHE[user_id] = url
         return url
     except Exception as e:
+        # Косметическая картинка — отсутствие аватара не должно блокировать весь score card.
         log.warning("profile fetch failed for %s: %s", user_id, e)
         _PROFILE_CACHE[user_id] = None
         return None

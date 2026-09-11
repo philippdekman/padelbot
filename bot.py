@@ -109,79 +109,30 @@ def mark_added(uid: int, mid: str):
         set_user(uid, u)
 
 # ─── HTTP helpers ───────────────────────────────────────────────────
-# Playtomic блокирует IP датацентров (CloudFront WAF), поэтому все запросы к
-# api.playtomic.io гоняем через residential proxy (IPRoyal).
-# Используем кастомное имя env-переменной чтобы Railway builder (mise/pip) не
-# пытался качать через неё свои зависимости — HTTPS_PROXY/HTTP_PROXY ломает билд.
-# Прокси задаётся 3 отдельными env, чтобы спецсимволы в username (запятые для country)
-# не ломали URL-парсер. Авторизация — вручную через Proxy-Authorization header.
-_PROXY_HOST = os.environ.get("PLAYTOMIC_PROXY_HOST", "").strip()
-_PROXY_PORT = os.environ.get("PLAYTOMIC_PROXY_PORT", "").strip()
-_PROXY_USER = os.environ.get("PLAYTOMIC_PROXY_USER", "").strip()
-_PROXY_PASS = os.environ.get("PLAYTOMIC_PROXY_PASS", "").strip()
-
-# httpx уже есть как транзитивная зависимость python-telegram-bot; он аккуратно
-# обрабатывает прокси-авторизацию (вкл. спецсимволы в логине) в CONNECT-туннелях.
-try:
-    import httpx as _httpx
-except ImportError:
-    _httpx = None
-
-_playtomic_client = None
-def _get_playtomic_client():
-    global _playtomic_client
-    if _playtomic_client is not None:
-        return _playtomic_client
-    if not (_PROXY_HOST and _PROXY_PORT and _httpx):
-        return None
-    # httpx.URL(username=..., password=...) — корректно экранирует спецсимволы
-    proxy_kwargs = {"scheme": "http", "host": _PROXY_HOST, "port": int(_PROXY_PORT)}
-    if _PROXY_USER and _PROXY_PASS:
-        proxy_kwargs["username"] = _PROXY_USER
-        proxy_kwargs["password"] = _PROXY_PASS
-    proxy_url = _httpx.URL(**proxy_kwargs)
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; PadelBot/2.0)",
-               "Accept": "application/json"}
-    # httpx <0.28 использует proxies=, ≥ 0.28 — proxy=. Пробуем оба.
-    try:
-        _playtomic_client = _httpx.Client(proxies=proxy_url, timeout=60.0, headers=headers)
-    except TypeError:
-        _playtomic_client = _httpx.Client(proxy=proxy_url, timeout=60.0, headers=headers)
-    return _playtomic_client
-
-def api_get(url: str, timeout: int = 20):
-    is_playtomic = "playtomic.io" in url
-    client = _get_playtomic_client() if is_playtomic else None
-    try:
-        if client is not None:
-            r = client.get(url, timeout=max(timeout, 45))
-            if r.status_code >= 400:
-                log.warning("API error %s: HTTP %s", url[:100], r.status_code)
-                return None
-            return r.json()
-        # fallback — прямой запрос без прокси
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; PadelBot/2.0)",
-            "Accept": "application/json",
-        })
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())
-    except Exception as e:
-        log.warning("API error %s: %s", url[:100], e)
-        return None
-
-# ─── Playtomic API (verified endpoints) ────────────────────────────
-BASE = "https://api.playtomic.io/v1"
+# Playtomic closed anonymous API access in mid-2026 — every endpoint now
+# needs a Bearer JWT from a real login, AND still sits behind a CloudFront
+# WAF that also blocks non-browser TLS fingerprints from datacenter IPs.
+# All of that lives in playtomic_api.py (shared with courts.py/rating.py/
+# score_image.py). Failures raise PlaytomicError — callers must NOT catch
+# it and silently report "nothing found"; that was the exact bug that made
+# outages indistinguishable from a genuinely empty search.
+import playtomic_api
+from playtomic_api import PlaytomicError, PlaytomicAuthError
 
 def playtomic_clubs(lat, lon, radius_m=50000):
-    """Search clubs near coordinates. Returns list of tenant dicts."""
-    url = f"{BASE}/tenants?sport_id=PADEL&coordinate={lat},{lon}&radius={radius_m}&size=50"
-    return api_get(url) or []
+    """Search clubs near coordinates. Returns list of tenant dicts.
+    Raises PlaytomicError on failure — does not swallow to []."""
+    data = playtomic_api.get("/v1/tenants", params={
+        "sport_id": "PADEL", "coordinate": f"{lat},{lon}",
+        "radius": radius_m, "size": 50,
+    })
+    return data if isinstance(data, list) else []
 
 def playtomic_matches_by_tenants(tenant_ids: list, date_from=None, max_pages=20):
     """Get matches for given tenant IDs. Параллельные запросы по клубам.
     API возвращает матчи DESC по дате старта. Проходим до страниц где
-    oldest_on_page < target_start."""
+    oldest_on_page < target_start. Raises PlaytomicError on failure — a
+    failed tenant is a real error, not "this club has no matches"."""
     if not tenant_ids:
         return []
     import concurrent.futures
@@ -190,8 +141,9 @@ def playtomic_matches_by_tenants(tenant_ids: list, date_from=None, max_pages=20)
     def _fetch_for_tenant(tid):
         out = []
         for page in range(max_pages):
-            url = f"{BASE}/matches?sport_id=PADEL&tenant_id={tid}&page={page}&size=100"
-            data = api_get(url)
+            data = playtomic_api.get("/v1/matches", params={
+                "sport_id": "PADEL", "tenant_id": tid, "page": page, "size": 100,
+            })
             if not isinstance(data, list) or not data:
                 break
             out.extend(data)
@@ -203,16 +155,27 @@ def playtomic_matches_by_tenants(tenant_ids: list, date_from=None, max_pages=20)
         return out
 
     all_matches = []
-    # Параллельно до 8 клубов одновременно
+    errors = []
+    # Параллельно до 8 клубов одновременно; собираем первую ошибку и поднимаем
+    # её после цикла, чтобы один сбойный клуб не тонул тихо в потоке.
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-        for matches in ex.map(_fetch_for_tenant, tenant_ids):
-            all_matches.extend(matches)
+        futures = {ex.submit(_fetch_for_tenant, tid): tid for tid in tenant_ids}
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                all_matches.extend(fut.result())
+            except PlaytomicError as e:
+                errors.append(e)
+    if errors and not all_matches:
+        # Все запросы упали — это сбой API, а не "нет матчей".
+        raise errors[0]
     return all_matches
 
 def playtomic_tournaments(lat, lon, radius_m=50000):
-    """Search tournaments near coordinates."""
-    url = f"{BASE}/tournaments?sport_id=PADEL&coordinate={lat},{lon}&radius={radius_m}&size=400"
-    data = api_get(url)
+    """Search tournaments near coordinates. Raises PlaytomicError on failure."""
+    data = playtomic_api.get("/v2/tournaments", params={
+        "sport_id": "PADEL", "coordinate": f"{lat},{lon}",
+        "radius": radius_m, "size": 400,
+    })
     return data if isinstance(data, list) else []
 
 # ─── MATCHi parsing ─────────────────────────────────────────────
@@ -1361,9 +1324,11 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── My schedule ───────────────────────────────────────────────────
 def playtomic_user_matches(playtomic_user_id):
-    """Get all matches a user is registered in. Returns up to 100 matches."""
-    url = f"{BASE}/matches?sport_id=PADEL&user_id={playtomic_user_id}&size=100"
-    data = api_get(url)
+    """Get all matches a user is registered in. Returns up to 100 matches.
+    Raises PlaytomicError on failure."""
+    data = playtomic_api.get("/v1/matches", params={
+        "sport_id": "PADEL", "user_id": playtomic_user_id, "size": 100,
+    })
     return data if isinstance(data, list) else []
 
 # ─── Calendar / Maps deep-links ───
@@ -2058,8 +2023,12 @@ async def _courts_handle(q, uid, context, data):
         await q.edit_message_text("Ищу свободные корты...")
         loc_name = watch.get("loc_name") or "Limassol"
         tz_str = LOCATIONS.get(loc_name, {}).get("tz", "UTC")
-        slots = courts.collect_slots(watch, ZoneInfo(tz_str))
         chat_id = q.message.chat_id
+        try:
+            slots = courts.collect_slots(watch, ZoneInfo(tz_str))
+        except PlaytomicError as e:
+            await context.bot.send_message(chat_id, f"\u26a0\ufe0f Playtomic \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d ({e}).")
+            return
         if not slots:
             await context.bot.send_message(chat_id, "Ничего не найдено по фильтрам.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="courts_menu")]]))
@@ -2129,7 +2098,11 @@ async def _courts_handle(q, uid, context, data):
         chat_id = q.message.chat_id
         loc_name = p.get("loc_name") or "Limassol"
         tz_str = LOCATIONS.get(loc_name, {}).get("tz", "UTC")
-        slots = courts.collect_slots(p, ZoneInfo(tz_str))
+        try:
+            slots = courts.collect_slots(p, ZoneInfo(tz_str))
+        except PlaytomicError as e:
+            await context.bot.send_message(chat_id, f"\u26a0\ufe0f Playtomic \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d ({e}).")
+            return
         if not slots:
             await context.bot.send_message(chat_id, "Ничего не найдено.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="courts_menu")]]))
@@ -2380,7 +2353,11 @@ async def _courts_handle(q, uid, context, data):
         chat_id = q.message.chat_id
         loc_name = preset.get("loc_name") or "Limassol"
         tz_str = LOCATIONS.get(loc_name, {}).get("tz", "UTC")
-        slots = courts.collect_slots(preset, ZoneInfo(tz_str))
+        try:
+            slots = courts.collect_slots(preset, ZoneInfo(tz_str))
+        except PlaytomicError as e:
+            await context.bot.send_message(chat_id, f"\u26a0\ufe0f Playtomic \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d ({e}).")
+            return
         if not slots:
             await context.bot.send_message(chat_id, "Ничего не найдено.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="courts_menu")]]))
@@ -2503,7 +2480,11 @@ async def watch_rating(context: ContextTypes.DEFAULT_TYPE):
     pt_id = u.get("playtomic_user_id")
     if not pt_id or not u.get("rating_watch_active"):
         context.job.schedule_removal(); return
-    matches = rating.fetch_user_matches(pt_id)
+    try:
+        matches = rating.fetch_user_matches(pt_id)
+    except PlaytomicError as e:
+        log.warning("rating watcher uid=%s: Playtomic \u0441\u0431\u043e\u0439: %s", uid, e)
+        return
     hist = rating.history_from_matches(matches, pt_id)
     cur = rating.current_level(hist)
     if cur is None:
@@ -2546,7 +2527,11 @@ async def watch_courts(context: ContextTypes.DEFAULT_TYPE):
             "Мониторинг свободных кортов автоматически остановлен — все окна уже в прошлом.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
         return
-    slots = courts.collect_slots(watch, tz)
+    try:
+        slots = courts.collect_slots(watch, tz)
+    except PlaytomicError as e:
+        log.warning("courts watcher uid=%s: Playtomic \u0441\u0431\u043e\u0439: %s", uid, e)
+        return
     seen = set(u.get("court_seen", []))
     new_slots = [s for s in slots if s["key"] not in seen]
     if new_slots:
@@ -2738,7 +2723,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             u["following"] = following
             # Try to fetch the player's name from Playtomic (через api_get — proxy-aware)
             try:
-                pdata = api_get(f"https://api.playtomic.io/v2/users/{pt_id}", timeout=10) or {}
+                pdata = playtomic_api.get(f"/v2/users/{pt_id}") or {}
                 pname = (pdata.get("full_name") or pdata.get("name") or "").strip() or f"Игрок {pt_id}"
                 names[pt_id] = pname
             except Exception:
@@ -2932,7 +2917,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if puid not in following:
             following.append(puid); u["following"] = following
             try:
-                pdata = api_get(f"https://api.playtomic.io/v2/users/{puid}", timeout=10) or {}
+                pdata = playtomic_api.get(f"/v2/users/{puid}") or {}
                 names[puid] = (pdata.get("full_name") or pdata.get("name") or f"Игрок {puid}").strip()
             except Exception:
                 names.setdefault(puid, f"Игрок {puid}")
@@ -3289,13 +3274,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("🔍 Ищу по всем вашим дням и окнам...",
             parse_mode="HTML")
         w = u.get("wizard") or {}
-        matches, tournaments, matchi = do_search(w)
-        seen = u.get("seen_events") or {}
-        for m in matches: seen[event_key(m)] = True
-        for t in tournaments: seen[event_key(t)] = True
-        for mc in matchi: seen[event_key(mc)] = True
-        u["seen_events"] = seen
-        set_user(uid, u)
+        try:
+            matches, tournaments, matchi = do_search(w)
+        except PlaytomicError as e:
+            log.warning("daily_search_now: Playtomic сбой: %s", e)
+            await context.bot.send_message(chat_id,
+                f"⚠️ Playtomic временно недоступен ({e}).\nЭто не значит «nothing» — попробуй ещё раз позже.",
+                parse_mode="HTML")
+            return
+        # важно: ручной поиск не трогает seen_events — иначе фоновый watch_tick
+        # никогда не увидит эти события как «новые» и не уведомит о них сам.
         text = format_results(matches, tournaments, matchi,
             "📊 Найденные события по твоим окнам",
             following=set(u.get("following") or []))
@@ -3304,7 +3292,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for chunk in split_message(text):
             await context.bot.send_message(chat_id, chunk, parse_mode="HTML",
                 disable_web_page_preview=True)
-        await context.bot.send_message(chat_id, "Готово. Новые события отмечены как виденные.",
+        await context.bot.send_message(chat_id, "Готово. Фоновый мониторинг продолжит работать как обычно.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("← К окнам по дням", callback_data="daily_menu")]]))
         return
@@ -3589,10 +3577,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("Настройки поиска не найдены. Нажми «Настроить поиск игр».",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="back_main")]]))
             return
-        # Сброс истории уведомлений — чтобы при включении был полный отчёт.
-        u["seen_events"] = {}
-        u["seen_full_matches"] = []
-        set_user(uid, u)
+        # Заметка: seen_events больше не сбрасывается заранее — launch_monitoring
+        # делает это сам и только после успешного первичного поиска. Старый ресет
+        # тут стирал историю до того, как мы знаем — успешен ли поиск.
         await launch_monitoring(q, uid, context, w)
         return
 
@@ -4234,7 +4221,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pt_id = u.get("playtomic_user_id")
         if not pt_id: await _need_link(q); return
         await q.edit_message_text("Загружаю...")
-        matches = rating.fetch_user_matches(pt_id)
+        try:
+            matches = rating.fetch_user_matches(pt_id)
+        except PlaytomicError as e:
+            await q.edit_message_text(f"\u26a0\ufe0f Playtomic \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d ({e}).")
+            return
         hist = rating.history_from_matches(matches, pt_id)
         cur = rating.current_level(hist)
         if cur is None:
@@ -4269,7 +4260,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not pt_id: await _need_link(q); return
         chat_id = q.message.chat_id
         await q.edit_message_text("Строю график...")
-        matches = rating.fetch_user_matches(pt_id)
+        try:
+            matches = rating.fetch_user_matches(pt_id)
+        except PlaytomicError as e:
+            await context.bot.send_message(chat_id, f"\u26a0\ufe0f Playtomic \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d ({e}).")
+            return
         hist = rating.history_from_matches(matches, pt_id)
         if not hist:
             await context.bot.send_message(chat_id, "Нет данных.",
@@ -4312,9 +4307,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("←", callback_data="rating_menu")]]))
         else:
             # Сразу инициализируем базовый уровень
-            matches = rating.fetch_user_matches(pt_id)
-            hist = rating.history_from_matches(matches, pt_id)
-            cur = rating.current_level(hist)
+            try:
+                matches = rating.fetch_user_matches(pt_id)
+                hist = rating.history_from_matches(matches, pt_id)
+                cur = rating.current_level(hist)
+            except PlaytomicError:
+                cur = None
             u["last_known_level"] = cur
             u["rating_watch_active"] = True
             u["chat_id"] = chat_id
@@ -4707,14 +4705,27 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Monitoring ─────────────────────────────────────────────────────
 async def launch_monitoring(q, uid, context, w):
+    chat_id = q.message.chat_id
+    await q.edit_message_text("🔍 Первый поиск...", parse_mode="HTML")
+
+    # Важно: старый job снимаем и seen_events/monitoring_active трогаем только
+    # если поиск действительно прошёл — иначе сбой Playtomic оставляет пользователя
+    # с пустой историей и без активного мониторинга.
+    try:
+        matches, tournaments, matchi = do_search(w)
+    except PlaytomicError as e:
+        log.warning("launch_monitoring: Playtomic сбой: %s", e)
+        await context.bot.send_message(chat_id,
+            f"⚠️ Playtomic временно недоступен ({e}).\n"
+            f"Мониторинг не запущен — нажми «Включить мониторинг» ещё раз, когда пройдёт.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶ Повторить", callback_data="resume_search")]]))
+        return
+
     job_name = f"watch_{uid}"
     for job in context.job_queue.get_jobs_by_name(job_name):
         job.schedule_removal()
 
-    chat_id = q.message.chat_id
-    await q.edit_message_text("🔍 Первый поиск...", parse_mode="HTML")
-
-    matches, tournaments, matchi = do_search(w)
     text = format_results(matches, tournaments, matchi, "📊 Начальный отчёт — все подходящие матчи и турниры",
                           following=set((get_user(uid).get("following")) or []))
 
@@ -4724,6 +4735,7 @@ async def launch_monitoring(q, uid, context, w):
     for t in tournaments: seen[event_key(t)] = True
     for mc in matchi: seen[event_key(mc)] = True
     u["seen_events"] = seen
+    u["seen_full_matches"] = []
     u["monitoring_active"] = True
     u["chat_id"] = chat_id  # store for restart recovery
     set_user(uid, u)
@@ -4998,7 +5010,23 @@ async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
     if not w:
         return
 
-    matches, tournaments, matchi = do_search(w)
+    try:
+        matches, tournaments, matchi = do_search(w)
+        matches_all_unfiltered, _t_unused, _mc_unused = do_search_unfiltered(w)
+    except PlaytomicError as e:
+        log.warning("watch_tick uid=%s: playtomic error: %s", uid, e)
+        last_err_at = u.get("last_playtomic_error_notified_at", 0)
+        now_ts = datetime.now(timezone.utc).timestamp()
+        if now_ts - last_err_at > 3600:
+            u["last_playtomic_error_notified_at"] = now_ts
+            set_user(uid, u)
+            try:
+                await context.bot.send_message(chat_id,
+                    f"\u26a0\ufe0f Playtomic \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d ({e}). \u041c\u043e\u043d\u0438\u0442\u043e\u0440\u0438\u043d\u0433 \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0435\u0442 \u043f\u044b\u0442\u0430\u0442\u044c\u0441\u044f.")
+            except Exception:
+                pass
+        return
+
     seen = u.get("seen_events", {})
     full_seen = set(u.get("seen_full_matches", []))
     pt_id = u.get("playtomic_user_id")
@@ -5022,7 +5050,6 @@ async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
     # Детект «освободилось место» — матчи подходящие по фильтрам, бывшие полными и ставшие неполными.
     # Для этого отдельно вызовём do_search без фильтра по «полным» — в текущем filter полные отфильтровываются.
     # Проще: из всех raw matches обратим внимание на те которые отфильтровались только из-за фулл.
-    matches_all_unfiltered, _t_unused, _mc_unused = do_search_unfiltered(w)
     cur_full_ids = set()
     freed_matches = []
     for m in matches_all_unfiltered:
