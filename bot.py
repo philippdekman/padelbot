@@ -4915,7 +4915,11 @@ async def watch_my_account(context: ContextTypes.DEFAULT_TYPE):
     pt_id = u.get("playtomic_user_id")
     if not pt_id:
         return
-    matches = playtomic_user_matches(pt_id)
+    try:
+        matches = playtomic_user_matches(pt_id)
+    except PlaytomicError as e:
+        log.warning("watch_my_account uid=%s: Playtomic \u0441\u0431\u043e\u0439: %s", uid, e)
+        return
     prev_states = u.get("my_match_states", {})
     new_states = {m["match_id"]: _my_match_state(m, pt_id)
                   for m in matches if m.get("match_id")}
@@ -5196,8 +5200,30 @@ async def post_init(application):
             )
     log.info(f"Restored {restored} search job(s), {my_restored} my-account job(s)")
 
+async def _global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
+    """Catches any exception unhandled by a specific handler/job — mainly
+    PlaytomicError from the ~20 \u00abмоё расписание\u00bb call sites that don't
+    each carry their own try/except. Without this, a Playtomic outage left
+    the user staring at \u00abЗагружаю...\u00bb forever with only a silent traceback
+    in the logs (\u00abNo error handlers are registered\u00bb)."""
+    err = context.error
+    log.warning("unhandled exception in update handler: %s", err, exc_info=err)
+    if not isinstance(err, PlaytomicError):
+        return
+    chat_id = None
+    if getattr(update, "effective_chat", None):
+        chat_id = update.effective_chat.id
+    if chat_id is None:
+        return
+    try:
+        await context.bot.send_message(chat_id,
+            f"\u26a0\ufe0f Playtomic \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d ({err}). \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439 \u0435\u0449\u0451 \u0440\u0430\u0437 \u043f\u043e\u0437\u0436\u0435.")
+    except Exception:
+        pass
+
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
+    app.add_error_handler(_global_error_handler)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("status", cmd_status))
