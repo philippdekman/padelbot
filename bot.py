@@ -5019,17 +5019,26 @@ async def watch_tick(context: ContextTypes.DEFAULT_TYPE):
         matches_all_unfiltered, _t_unused, _mc_unused = do_search_unfiltered(w)
     except PlaytomicError as e:
         log.warning("watch_tick uid=%s: playtomic error: %s", uid, e)
-        last_err_at = u.get("last_playtomic_error_notified_at", 0)
-        now_ts = datetime.now(timezone.utc).timestamp()
-        if now_ts - last_err_at > 3600:
-            u["last_playtomic_error_notified_at"] = now_ts
+        # Уведомляем только один раз на начало сбоя, а не каждый тик — многодневный сбой
+        # (например, не заданы PLAYTOMIC_EMAIL/PASSWORD) иначе спамил бы одним и тем же
+        # сообщением каждые N часов днями.
+        if not u.get("playtomic_error_alerted"):
+            u["playtomic_error_alerted"] = True
             set_user(uid, u)
             try:
                 await context.bot.send_message(chat_id,
-                    f"\u26a0\ufe0f Playtomic \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d ({e}). \u041c\u043e\u043d\u0438\u0442\u043e\u0440\u0438\u043d\u0433 \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0435\u0442 \u043f\u044b\u0442\u0430\u0442\u044c\u0441\u044f.")
+                    f"\u26a0\ufe0f Playtomic \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d ({e}). \u041c\u043e\u043d\u0438\u0442\u043e\u0440\u0438\u043d\u0433 \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u0435\u0442 \u043f\u044b\u0442\u0430\u0442\u044c\u0441\u044f \u0432 \u0444\u043e\u043d\u0435 \u0431\u0435\u0437 \u043d\u043e\u0432\u044b\u0445 \u0443\u0432\u0435\u0434\u043e\u043c\u043b\u0435\u043d\u0438\u0439, \u043f\u043e\u043a\u0430 \u043d\u0435 \u0432\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u0441\u044f.")
             except Exception:
                 pass
         return
+
+    if u.get("playtomic_error_alerted"):
+        u["playtomic_error_alerted"] = False
+        set_user(uid, u)
+        try:
+            await context.bot.send_message(chat_id, "\u2705 Playtomic \u0441\u043d\u043e\u0432\u0430 \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442, \u043c\u043e\u043d\u0438\u0442\u043e\u0440\u0438\u043d\u0433 \u0432\u043e\u0437\u043e\u0431\u043d\u043e\u0432\u0438\u043b\u0441\u044f.")
+        except Exception:
+            pass
 
     seen = u.get("seen_events", {})
     full_seen = set(u.get("seen_full_matches", []))
